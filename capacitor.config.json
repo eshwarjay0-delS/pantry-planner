@@ -1,0 +1,6 @@
+{
+  "appId": "com.pantryplanner.app",
+  "appName": "Pantry Planner",
+  "webDir": "dist",
+  "android": { "allowMixedContent": true }
+}
