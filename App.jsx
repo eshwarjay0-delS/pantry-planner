@@ -4,7 +4,7 @@ import {
   Trash2, Pencil, X, Check, Loader2, ImagePlus, Search, ArrowUpDown, Filter,
   Star, CalendarPlus, CalendarClock, TrendingUp, Receipt, AlertTriangle,
   CircleCheck, Clock, DollarSign, Store, ChevronRight, RotateCcw, Lightbulb,
-  Cog, KeyRound, ExternalLink,
+  Cog, KeyRound, ExternalLink, ClipboardList,
 } from "lucide-react";
 
 /* ─────────────────────────────  constants  ───────────────────────────── */
@@ -45,6 +45,40 @@ const TONE = {
   none: "bg-stone-100 text-stone-500 ring-stone-500/10",
 };
 
+// Guess a category from the item name so bulk-added items get sensible expiry.
+const CAT_KEYWORDS = {
+  Produce: ["tomato", "onion", "potato", "banana", "apple", "spinach", "okra", "chili", "chilli", "gourd", "doodhi", "tindora", "lettuce", "carrot", "pepper", "garlic", "ginger", "lemon", "lime", "fruit", "veg", "cilantro", "coriander", "mango", "grape", "berry", "cucumber", "broccoli", "cauliflower", "gobi", "matar", "peas", "mint", "watermelon", "avocado", "kale"],
+  Dairy: ["milk", "yogurt", "yoghurt", "curd", "cheese", "paneer", "butter", "cream", "egg", "ghee"],
+  "Meat & Seafood": ["chicken", "beef", "pork", "fish", "shrimp", "mutton", "lamb", "drumstick", "meat", "salmon", "turkey", "bacon", "sausage"],
+  Bakery: ["bread", "roti", "naan", "croissant", "bun", "bagel", "cake", "tortilla", "muffin"],
+  Frozen: ["frozen", "ice cream", "waffle", "nugget"],
+  Beverages: ["juice", "soda", "water", "coffee", "tea", "cola", "drink", "lassi"],
+  Snacks: ["chips", "cookie", "biscuit", "murukku", "namkeen", "snack", "cracker", "chocolate", "candy", "nuts", "dates", "popcorn"],
+  Pantry: ["rice", "flour", "atta", "dal", "lentil", "bean", "oil", "masala", "powder", "paste", "spice", "sugar", "salt", "oats", "cereal", "granola", "pasta", "sauce", "honey", "vinegar", "garam", "turmeric", "sona", "basmati"],
+  Household: ["soap", "detergent", "tissue", "paper", "cleaner", "towel", "foil", "bag", "wrap"],
+};
+function guessCategory(name) {
+  const n = (name || "").toLowerCase();
+  for (const cat of Object.keys(CAT_KEYWORDS)) if (CAT_KEYWORDS[cat].some((w) => n.includes(w))) return cat;
+  return "Other";
+}
+// Parse a pasted list ("Okra 2", "2 Doodhi", "Rice x3", "Onions - 4") into items.
+function parseBulk(text) {
+  const out = [];
+  for (const rawLine of (text || "").split(/[\n,]+/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let qty = 1, name = line, m;
+    if (/^\d/.test(line) && (m = line.match(/^(\d+(?:\.\d+)?)\s*[xX]?\s+(.+)$/))) { qty = parseFloat(m[1]); name = m[2]; }
+    else if ((m = line.match(/^(.+?)\s*(?:[xX]|[-:])\s*(\d+(?:\.\d+)?)$/))) { name = m[1]; qty = parseFloat(m[2]); }
+    else if ((m = line.match(/^(.+?)\s+(\d+(?:\.\d+)?)$/))) { name = m[1]; qty = parseFloat(m[2]); }
+    name = name.replace(/\s+/g, " ").trim();
+    if (!name) continue;
+    out.push({ name, category: guessCategory(name), quantity: qty > 0 ? qty : 1, unit: "pcs", confidence: "high" });
+  }
+  return out;
+}
+
 /* ─────────────────────────────  storage  ─────────────────────────────── */
 // One shared, persisted data layer. Everything (scan, receipts, meals, trips)
 // reads and writes through here, so the whole app stays in sync.
@@ -72,16 +106,26 @@ async function callClaude({ system, user, image }) {
   const content = image
     ? [{ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }, { type: "text", text: user }]
     : user;
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({ model: getModel(), max_tokens: 2048, system, messages: [{ role: "user", content }] }),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({ model: getModel(), max_tokens: 2048, system, messages: [{ role: "user", content }] }),
+    });
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? "The scan timed out. Check your connection and try again." : "Couldn't reach Anthropic. Check your internet connection.");
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     let msg = "AI request failed (" + res.status + ")";
     try { const j = await res.json(); if (j.error && j.error.message) msg = j.error.message; } catch (_) {}
@@ -238,7 +282,7 @@ function usePhoto() {
   const inputRef = useRef(null);
   const resolver = useRef(null);
   const node = (
-    <input ref={inputRef} type="file" accept="image/*" capture="environment" className="hidden"
+    <input ref={inputRef} type="file" accept="image/*" className="hidden"
       onChange={(e) => {
         const file = e.target.files && e.target.files[0];
         e.target.value = "";
@@ -427,24 +471,34 @@ function InventoryTab() {
 
 /* ─────────────────────────────  Scan tab  ─────────────────────────────── */
 
-function ScanTab() {
+function ScanTab({ openSettings }) {
   const { addOrMerge, notify } = useApp();
   const { node, pick } = usePhoto();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [items, setItems] = useState(null);
+  const [paste, setPaste] = useState(false);
+  const hasKey = !!getKey();
 
   const run = async (mode) => {
     setErr(""); setItems(null);
-    const img = await pick();
-    if (!img) return;
+    if (!getKey()) { setErr("Photo scanning uses AI, which needs your Anthropic API key. Tap the gear (⚙️) to add it — or use “Paste a list” below to add items without AI."); return; }
+    const img = await pick();          // opens camera OR gallery
+    if (!img) return;                  // cancelled
     setBusy(true);
     try {
       const res = await extractFromImage(img, mode);
-      if (!res.items.length) throw new Error("No items found. Try a clearer, well-lit photo.");
+      if (!res.items.length) throw new Error("No items found. Try a clearer, flatter, well-lit photo.");
       setItems(res.items);
     } catch (e) { setErr(e.message || "Scan failed. Please try again."); }
     finally { setBusy(false); }
+  };
+
+  const addPasted = (text) => {
+    const parsed = parseBulk(text);
+    if (!parsed.length) { setErr("Type at least one item, e.g. “Okra 2”."); return; }
+    setItems(parsed);
+    setPaste(false);
   };
 
   const edit = (idx, k, v) => setItems((s) => s.map((it, i) => i === idx ? { ...it, [k]: v } : it));
@@ -465,11 +519,18 @@ function ScanTab() {
             <div className="absolute -left-8 -bottom-8 h-28 w-28 rounded-full bg-white/5" />
             <div className="relative">
               <div className="mx-auto h-14 w-14 rounded-2xl bg-white/15 grid place-items-center mb-3"><Camera size={26} /></div>
-              <h2 className="text-xl font-bold" style={{ fontFamily: HEAD }}>Fill your inventory instantly</h2>
-              <p className="text-emerald-100/90 text-sm mt-1 max-w-xs mx-auto">Point at a receipt or your groceries. Claude reads the items and adds them for you.</p>
+              <h2 className="text-xl font-bold" style={{ fontFamily: HEAD }}>Fill your inventory fast</h2>
+              <p className="text-emerald-100/90 text-sm mt-1 max-w-xs mx-auto">Photograph a receipt or your groceries, or paste a list. Everything gets added at once.</p>
             </div>
           </div>
-          {err && <div className="mt-4 flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2.5 text-sm text-rose-700"><AlertTriangle size={16} className="mt-0.5" /> {err}</div>}
+
+          {!hasKey && (
+            <button onClick={openSettings} className="mt-4 w-full flex items-center gap-2 rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2.5 text-sm text-amber-800 text-left">
+              <KeyRound size={16} className="shrink-0" /> <span>Photo scanning needs your API key. <b>Tap to add it.</b> Or paste a list below — no key needed.</span>
+            </button>
+          )}
+          {err && <div className="mt-4 flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2.5 text-sm text-rose-700"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {err}</div>}
+
           <div className="grid grid-cols-2 gap-3 mt-4">
             <button disabled={busy} onClick={() => run("receipt")} className="rounded-2xl bg-white ring-1 ring-stone-200 p-5 text-center hover:ring-emerald-300 hover:shadow-sm transition disabled:opacity-50">
               <Receipt size={24} className="mx-auto text-emerald-700 mb-2" />
@@ -482,6 +543,11 @@ function ScanTab() {
               <p className="text-xs text-stone-400 mt-0.5">Identify what's in view</p>
             </button>
           </div>
+
+          <button disabled={busy} onClick={() => { setErr(""); setPaste(true); }} className="mt-3 w-full rounded-2xl bg-stone-800 text-white p-4 flex items-center justify-center gap-2 font-semibold active:scale-[.99] transition disabled:opacity-50">
+            <ClipboardList size={18} /> Paste a list  <span className="text-stone-400 font-normal text-sm">· no key needed</span>
+          </button>
+
           {busy && (
             <div className="mt-6 flex flex-col items-center gap-2 text-amber-600">
               <Loader2 size={26} className="animate-spin" />
@@ -490,6 +556,10 @@ function ScanTab() {
           )}
         </>
       )}
+
+      <Sheet open={paste} onClose={() => setPaste(false)} title="Paste a list">
+        <BulkPaste onAdd={addPasted} onClose={() => setPaste(false)} />
+      </Sheet>
 
       {items && (
         <div>
@@ -520,6 +590,34 @@ function ScanTab() {
         </div>
       )}
     </div>
+  );
+}
+
+function BulkPaste({ onAdd, onClose }) {
+  const [text, setText] = useState("");
+  const preview = parseBulk(text);
+  return (
+    <>
+      <p className="text-sm text-stone-500">One item per line. Add a number for quantity — it's optional.</p>
+      <textarea
+        value={text} onChange={(e) => setText(e.target.value)} autoFocus rows={7}
+        placeholder={"Okra 2\nDoodhi 1\nYellow Onions 3\nSona Masoori Rice\nChicken Drumsticks x2"}
+        className="w-full p-3 rounded-xl bg-white ring-1 ring-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none text-[15px] text-stone-800 font-mono resize-none"
+      />
+      <p className="text-xs text-stone-400">Formats that work: <code>Okra 2</code> · <code>2 Okra</code> · <code>Okra x2</code> · <code>Onions - 3</code></p>
+      {preview.length > 0 && (
+        <div className="rounded-xl bg-stone-50 ring-1 ring-stone-200 p-2 max-h-32 overflow-y-auto">
+          <p className="text-[11px] font-bold uppercase text-stone-400 px-1 mb-1">{preview.length} item{preview.length > 1 ? "s" : ""} detected</p>
+          <div className="flex flex-wrap gap-1">
+            {preview.map((p, i) => <span key={i} className="text-xs bg-white ring-1 ring-stone-200 rounded-md px-1.5 py-0.5">{CAT_EMOJI[p.category]} {p.name} ×{p.quantity}</span>)}
+          </div>
+        </div>
+      )}
+      <div className="flex gap-2 pt-1">
+        <Btn variant="outline" className="flex-1" onClick={onClose}>Cancel</Btn>
+        <Btn className="flex-1" disabled={!preview.length} onClick={() => onAdd(text)}><Check size={16} /> Review {preview.length || ""}</Btn>
+      </div>
+    </>
   );
 }
 
@@ -1077,7 +1175,7 @@ export default function App() {
         {/* content */}
         <main className="max-w-md mx-auto">
           {tab === "inventory" && <InventoryTab />}
-          {tab === "scan" && <ScanTab />}
+          {tab === "scan" && <ScanTab openSettings={() => setShowSettings(true)} />}
           {tab === "meals" && <MealsTab />}
           {tab === "planner" && <PlannerTab />}
           {tab === "shopping" && <ShoppingTab />}
