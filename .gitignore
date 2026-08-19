@@ -5,3 +5,4 @@ ios
 *.apk
 .DS_Store
 *.log
+android/app/google-services.json
