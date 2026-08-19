@@ -31,7 +31,7 @@ const firebaseConfig = {
   projectId: "pantry-planner-1265f",
   storageBucket: "pantry-planner-1265f.firebasestorage.app",
   messagingSenderId: "599790697185",
-  appId: "1:599790697185:android:87ea28f1a77e83a1d0d5a0" // Find this in your Firebase Console
+  appId: "1:599790697185:web:4aca0e13950c3fc3d0d5a0" // Find this in your Firebase Console
 };
 
 const CONFIGURED = firebaseConfig.apiKey && !firebaseConfig.apiKey.includes("PASTE");
