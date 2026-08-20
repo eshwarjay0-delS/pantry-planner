@@ -63,6 +63,21 @@ async function saveUserData(uid, data) {
   try { await setDoc(doc(db, "users", uid), data, { merge: true }); } catch (_) {}
 }
 
+// Instant local cache for meal ideas, written synchronously the moment they're
+// generated. Mobile browsers can discard a backgrounded tab before a debounced
+// Firestore write finishes, which is what was wiping suggestions on tab-switch —
+// this cache has no network round-trip, so it can't be lost that way.
+const ideasCacheKey = (uid) => "pp_ideas_cache_" + uid;
+function cacheIdeasLocally(uid, ideas, sig) {
+  try { localStorage.setItem(ideasCacheKey(uid), JSON.stringify({ ideas, sig })); } catch (_) {}
+}
+function readIdeasCache(uid) {
+  try { const v = localStorage.getItem(ideasCacheKey(uid)); return v ? JSON.parse(v) : null; } catch (_) { return null; }
+}
+function clearIdeasCache(uid) {
+  try { localStorage.removeItem(ideasCacheKey(uid)); } catch (_) {}
+}
+
 /* ─────────────────────────────  helpers  ─────────────────────────────── */
 
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
@@ -1042,7 +1057,10 @@ function MealsTab() {
       )}
 
       {browse.length === 0 ? (
-        <div className="mt-2"><Empty icon={Utensils} title="No dishes yet" sub="Tap “Suggest Indian dishes” for ~40 ideas across breakfast, lunch, dinner and dessert — or add one by hand."
+        <div className="mt-2"><Empty icon={Utensils} title="No dishes yet"
+          sub={pantry.length === 0
+            ? "Your pantry is empty, so there's nothing to suggest from yet. Add items, then tap “Suggest Indian dishes.”"
+            : "Tap “Suggest Indian dishes” for ~40 ideas across breakfast, lunch, dinner and dessert — or add one by hand."}
           action={<Btn variant="outline" onClick={() => setManual(true)}><Plus size={16} /> Add manually</Btn>} /></div>
       ) : (
         <div className="mt-3 space-y-2">
@@ -1602,7 +1620,7 @@ export default function App() {
       catch (e2) { setAuthErr(e2.message || e.message || "Sign-in failed."); }
     }
   };
-  const doSignOut = async () => { try { await signOut(auth); } catch (_) {} };
+  const doSignOut = async () => { try { if (user) clearIdeasCache(user.uid); await signOut(auth); } catch (_) {} };
 
   // ── load this user's private data on sign-in ──
   useEffect(() => {
@@ -1610,9 +1628,17 @@ export default function App() {
     if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); return; }
     let alive = true;
     setLoaded(false);
+    // Instant hydrate from the local cache first — no network wait, so meal
+    // ideas reappear immediately even if the last Firestore write never landed
+    // (e.g. the tab got discarded mid-save). Firestore then confirms/updates.
+    const cached = readIdeasCache(user.uid);
+    if (cached && cached.ideas && cached.ideas.length) { setIdeas(cached.ideas); setIdeasSig(cached.sig || ""); }
     loadUserData(user.uid).then((d) => {
       if (!alive) return;
-      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips); setIdeas(d.ideas); setIdeasSig(d.ideasSig);
+      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips);
+      // Only Firestore overrides the local cache if it actually has ideas —
+      // otherwise a not-yet-synced write shouldn't erase what we just restored.
+      if (d.ideas && d.ideas.length) { setIdeas(d.ideas); setIdeasSig(d.ideasSig); }
       setLoaded(true);
     });
     return () => { alive = false; };
@@ -1625,6 +1651,22 @@ export default function App() {
     saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips, ideas, ideasSig }), 600);
     return () => clearTimeout(saveTimer.current);
   }, [pantry, meals, trips, ideas, ideasSig, loaded, user]);
+
+  // Mirror ideas to the instant local cache the moment they change — this write
+  // is synchronous (no network), so it survives even if the tab gets killed
+  // before the debounced Firestore save above has a chance to run.
+  useEffect(() => {
+    if (!loaded || !user) return;
+    if (ideas.length) cacheIdeasLocally(user.uid, ideas, ideasSig);
+    else clearIdeasCache(user.uid);
+  }, [ideas, ideasSig, loaded, user]);
+
+  // Once the pantry is empty there's nothing left to suggest from — clear the
+  // stale idea list rather than leaving old suggestions sitting around forever.
+  useEffect(() => {
+    if (!loaded || !user) return;
+    if (pantry.length === 0 && ideas.length > 0) { setIdeas([]); setIdeasSig(""); }
+  }, [pantry.length, loaded, user]);
 
   // fonts
   useEffect(() => {
