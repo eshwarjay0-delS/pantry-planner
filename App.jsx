@@ -26,12 +26,12 @@ const BODY = "'Nunito', ui-sans-serif, system-ui, -apple-system, sans-serif";
 // 3. Enable Authentication → Google, and create a Firestore database.
 // (These values are safe to be public — access is controlled by security rules.)
 const firebaseConfig = {
-  apiKey: "PASTE_YOUR_API_KEY",
-  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
-  projectId: "PASTE_YOUR_PROJECT_ID",
-  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_YOUR_SENDER_ID",
-  appId: "PASTE_YOUR_APP_ID",
+apiKey: "AIzaSyB8ZDDg2QSO7By_bUCRcVifwyjUGzJCNOU", // Find this in your Firebase Console
+authDomain: "pantry-planner-1265f.firebaseapp.com",
+projectId: "pantry-planner-1265f",
+storageBucket: "pantry-planner-1265f.firebasestorage.app",
+messagingSenderId: "599790697185",
+appId: "1:599790697185:web:4aca0e13950c3fc3d0d5a0" // Find this in your Firebase Console
 };
 
 // After you deploy the Cloudflare Worker, paste its URL here (e.g.
