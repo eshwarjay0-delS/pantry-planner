@@ -26,12 +26,12 @@ const BODY = "'Nunito', ui-sans-serif, system-ui, -apple-system, sans-serif";
 // 3. Enable Authentication → Google, and create a Firestore database.
 // (These values are safe to be public — access is controlled by security rules.)
 const firebaseConfig = {
-apiKey: "AIzaSyB8ZDDg2QSO7By_bUCRcVifwyjUGzJCNOU", // Find this in your Firebase Console
-authDomain: "pantry-planner-1265f.firebaseapp.com",
-projectId: "pantry-planner-1265f",
-storageBucket: "pantry-planner-1265f.firebasestorage.app",
-messagingSenderId: "599790697185",
-appId: "1:599790697185:web:4aca0e13950c3fc3d0d5a0" // Find this in your Firebase Console
+  apiKey: "AIzaSyB8ZDDg2QSO7By_bUCRcVifwyjUGzJCNOU",
+  authDomain: "pantry-planner-1265f.firebaseapp.com",
+  projectId: "pantry-planner-1265f",
+  storageBucket: "pantry-planner-1265f.firebasestorage.app",
+  messagingSenderId: "599790697185",
+  appId: "1:599790697185:web:4aca0e13950c3fc3d0d5a0",
 };
 
 // After you deploy the Cloudflare Worker, paste its URL here (e.g.
@@ -301,6 +301,26 @@ async function extractFromImage(images, mode) {
   return { store: out.store || null, date: out.date || null, total: out.total == null ? null : Number(out.total), items };
 }
 
+// A single AI call with too many images risks the request-size limit and slow
+// mobile uploads. Split large batches into small groups, analyse each, and
+// merge the results — so "select 20 photos" stays reliable either way.
+const SCAN_BATCH_SIZE = 6;
+async function extractFromImages(images, mode, onProgress) {
+  const chunks = [];
+  for (let i = 0; i < images.length; i += SCAN_BATCH_SIZE) chunks.push(images.slice(i, i + SCAN_BATCH_SIZE));
+  let store = null, date = null, total = null;
+  const items = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (onProgress) onProgress(i + 1, chunks.length);
+    const res = await extractFromImage(chunks[i], mode);
+    if (!store) store = res.store;
+    if (!date) date = res.date;
+    if (total == null) total = res.total; // keep the first total seen rather than summing (avoids double-counting a repeated receipt total)
+    items.push(...res.items);
+  }
+  return { store, date, total, items };
+}
+
 const MEAL_TYPES = ["breakfast", "lunch", "dinner", "dessert"];
 
 async function suggestMeals(pantry) {
@@ -435,8 +455,47 @@ function SectionTitle({ children, right }) {
 }
 
 /* ─────────────────────────────  image picker  ─────────────────────────── */
-// Always resolves an array of {data, mediaType} — one photo or a whole batch,
-// so callers can send several images to the AI in a single analysis pass.
+// Always resolves an array of {data, mediaType} — one photo or a whole batch.
+// Every photo is downscaled + re-encoded as JPEG first: a phone photo is
+// commonly 3–8MB, and 15–20 of those in one request (60–150MB) is what fails
+// on upload or hits the AI provider's request-size limit. Compressing first
+// keeps even a big batch small and reliable.
+
+function compressImage(file, maxDim = 1440, quality = 0.72) {
+  return new Promise((resolve) => {
+    const fallback = () => {
+      const reader = new FileReader();
+      reader.onload = () => resolve({ data: String(reader.result).split(",")[1], mediaType: file.type || "image/jpeg" });
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    };
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round((height * maxDim) / width); width = maxDim; }
+          else { width = Math.round((width * maxDim) / height); height = maxDim; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        URL.revokeObjectURL(url);
+        canvas.toBlob((blob) => {
+          if (!blob) { fallback(); return; }
+          const reader = new FileReader();
+          reader.onload = () => resolve({ data: String(reader.result).split(",")[1], mediaType: "image/jpeg" });
+          reader.onerror = fallback;
+          reader.readAsDataURL(blob);
+        }, "image/jpeg", quality);
+      };
+      img.onerror = fallback;
+      img.src = url;
+    } catch (_) { fallback(); }
+  });
+}
 
 function usePhoto() {
   const inputRef = useRef(null);
@@ -449,12 +508,7 @@ function usePhoto() {
         const resolve = resolver.current;
         resolver.current = null;
         if (!files.length || !resolve) { resolve && resolve([]); return; }
-        Promise.all(files.map((file) => new Promise((res, rej) => {
-          const reader = new FileReader();
-          reader.onload = () => res({ data: String(reader.result).split(",")[1], mediaType: file.type || "image/jpeg" });
-          reader.onerror = () => rej(new Error("read failed"));
-          reader.readAsDataURL(file);
-        }))).then(resolve).catch(() => resolve([]));
+        Promise.all(files.map((file) => compressImage(file))).then((imgs) => resolve(imgs.filter(Boolean))).catch(() => resolve([]));
       }} />
   );
   const pick = () => new Promise((res) => { resolver.current = res; inputRef.current && inputRef.current.click(); });
@@ -462,6 +516,7 @@ function usePhoto() {
 }
 
 /* ─────────────────────────────  Inventory tab  ────────────────────────── */
+
 
 function ConfBadge({ c }) {
   const map = { high: "bg-emerald-100 text-emerald-700", medium: "bg-amber-100 text-amber-700", low: "bg-rose-100 text-rose-700" };
@@ -636,26 +691,27 @@ function ScanTab({ openSettings }) {
   const { node, pick } = usePhoto();
   const [busy, setBusy] = useState(false);
   const [busyCount, setBusyCount] = useState(0);
+  const [batchProgress, setBatchProgress] = useState(null); // {i, n} while batching a big photo set
   const [err, setErr] = useState("");
   const [paste, setPaste] = useState(false);
   const [result, setResult] = useState(null);   // { items, added, undoSnapshot } after auto-commit
   const hasKey = aiReady();
 
   const run = async (mode) => {
-    setErr(""); setResult(null);
+    setErr(""); setResult(null); setBatchProgress(null);
     if (!aiReady()) { setErr("Photo scanning uses AI, which needs an API key. Tap the gear (⚙️) to add one — or use “Paste a list” below to add items without AI."); return; }
-    const imgs = await pick();                 // opens gallery — pick one or several at once
+    const imgs = await pick();                 // opens gallery — pick one or several at once (auto-compressed)
     if (!imgs.length) return;                   // cancelled
     setBusyCount(imgs.length); setBusy(true);
     try {
-      const res = await extractFromImage(imgs, mode);   // all photos analysed together, one AI call
+      const res = await extractFromImages(imgs, mode, (i, n) => n > 1 && setBatchProgress({ i, n }));
       if (!res.items.length) throw new Error("No items found. Try clearer, well-lit photos.");
       const before = pantry;                      // snapshot for undo
       const added = addOrMerge(res.items);
       setResult({ items: res.items, added, undoSnapshot: before });
       notify(`${added} item${added > 1 ? "s" : ""} added to inventory`);
-    } catch (e) { setErr(e.message || "Scan failed. Please try again."); }
-    finally { setBusy(false); }
+    } catch (e) { setErr(e.message || "Scan failed. Please try again — or split into a couple of smaller batches."); }
+    finally { setBusy(false); setBatchProgress(null); }
   };
 
   const addPasted = (text) => {
@@ -715,7 +771,11 @@ function ScanTab({ openSettings }) {
       {busy && (
         <div className="mt-6 flex flex-col items-center gap-2 text-amber-600">
           <Loader2 size={26} className="animate-spin" />
-          <p className="text-sm font-semibold">Analysing {busyCount > 1 ? `${busyCount} photos together` : "your photo"}…</p>
+          <p className="text-sm font-semibold">
+            {batchProgress
+              ? `Analysing batch ${batchProgress.i} of ${batchProgress.n} (${busyCount} photos)…`
+              : `Analysing ${busyCount > 1 ? `${busyCount} photos together` : "your photo"}…`}
+          </p>
         </div>
       )}
 
@@ -1229,6 +1289,7 @@ function ShoppingTab() {
   const [form, setForm] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [batchProgress, setBatchProgress] = useState(null);
 
   const total = trips.reduce((a, t) => a + (Number(t.amount) || 0), 0);
   const avg = trips.length ? total / trips.length : 0;
@@ -1237,16 +1298,16 @@ function ShoppingTab() {
   const maxAmt = Math.max(1, ...trips.map((t) => Number(t.amount) || 0));
 
   const scanReceipt = async () => {
-    setErr("");
-    const imgs = await pick();          // supports multiple photos (multi-page receipts)
+    setErr(""); setBatchProgress(null);
+    const imgs = await pick();          // supports multiple photos (multi-page receipts), auto-compressed
     if (!imgs.length) return;
     setBusy(true);
     try {
-      const res = await extractFromImage(imgs, "receipt");
+      const res = await extractFromImages(imgs, "receipt", (i, n) => n > 1 && setBatchProgress({ i, n }));
       const amt = res.total != null ? res.total : res.items.reduce((a, it) => a + (Number(it.price) || 0), 0);
       setForm({ store: res.store || "", date: res.date || todayISO(), amount: amt ? String(amt.toFixed(2)) : "", notes: "", items: res.items });
-    } catch (e) { setErr(e.message || "Couldn't read the receipt."); }
-    finally { setBusy(false); }
+    } catch (e) { setErr(e.message || "Couldn't read the receipt — try again or a smaller batch."); }
+    finally { setBusy(false); setBatchProgress(null); }
   };
 
   const save = () => {
@@ -1294,7 +1355,7 @@ function ShoppingTab() {
         <Btn variant="ai" onClick={scanReceipt} disabled={busy}>{busy ? <Loader2 size={16} className="animate-spin" /> : <Receipt size={16} />} Scan receipt</Btn>
         <Btn variant="outline" onClick={() => setForm({ store: "", date: todayISO(), amount: "", notes: "", items: [] })}><Plus size={16} /> Log manually</Btn>
       </div>
-      {busy && <p className="text-center text-sm text-amber-600 mt-2 flex items-center justify-center gap-1"><Loader2 size={14} className="animate-spin" /> Reading receipt & pulling items…</p>}
+      {busy && <p className="text-center text-sm text-amber-600 mt-2 flex items-center justify-center gap-1"><Loader2 size={14} className="animate-spin" /> {batchProgress ? `Reading batch ${batchProgress.i} of ${batchProgress.n}…` : "Reading receipt & pulling items…"}</p>}
 
       {/* history */}
       <SectionTitle>Trip history</SectionTitle>
