@@ -26,13 +26,18 @@ const BODY = "'Nunito', ui-sans-serif, system-ui, -apple-system, sans-serif";
 // 3. Enable Authentication → Google, and create a Firestore database.
 // (These values are safe to be public — access is controlled by security rules.)
 const firebaseConfig = {
-  apiKey: "AIzaSyB8ZDDg2QSO7By_bUCRcVifwyjUGzJCNOU", // Find this in your Firebase Console
-  authDomain: "pantry-planner-1265f.firebaseapp.com",
-  projectId: "pantry-planner-1265f",
-  storageBucket: "pantry-planner-1265f.firebasestorage.app",
-  messagingSenderId: "599790697185",
-  appId: "1:599790697185:web:4aca0e13950c3fc3d0d5a0" // Find this in your Firebase Console
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
+  projectId: "PASTE_YOUR_PROJECT_ID",
+  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
+  messagingSenderId: "PASTE_YOUR_SENDER_ID",
+  appId: "PASTE_YOUR_APP_ID",
 };
+
+// After you deploy the Cloudflare Worker, paste its URL here (e.g.
+// "https://pantry-ai.YOUR-SUBDOMAIN.workers.dev"). When set, AI works for every
+// signed-in user with no personal key. Leave "" to fall back to per-user keys.
+const AI_PROXY_URL = "";
 
 const CONFIGURED = firebaseConfig.apiKey && !firebaseConfig.apiKey.includes("PASTE");
 let auth = null, db = null, googleProvider = null;
@@ -49,9 +54,9 @@ async function loadUserData(uid) {
   try {
     const snap = await getDoc(doc(db, "users", uid));
     const d = snap.exists() ? snap.data() : {};
-    return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [] };
+    return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [], ideas: d.ideas || [], ideasSig: d.ideasSig || "" };
   } catch (e) {
-    return { pantry: [], meals: [], trips: [], error: e.message };
+    return { pantry: [], meals: [], trips: [], ideas: [], ideasSig: "", error: e.message };
   }
 }
 async function saveUserData(uid, data) {
@@ -69,6 +74,8 @@ const fmtShort = (iso) => toDate(iso).toLocaleDateString(undefined, { month: "sh
 const fmtLong = (iso) => toDate(iso).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 const money = (n) => "$" + (Number(n) || 0).toFixed(2);
 const norm = (s) => (s || "").toLowerCase().trim().replace(/s$/, "");
+// A cheap fingerprint of pantry contents — used to detect "new items added" for auto-refresh.
+const pantrySig = (pantry) => pantry.map((p) => norm(p.name) + ":" + p.quantity).sort().join("|");
 
 function expiryStatus(item) {
   if (!item.expiry) return { tone: "none", label: "No date", short: "—" };
@@ -124,41 +131,116 @@ function parseBulk(text) {
 // Pantry/meal/trip data lives in the user's private Firestore doc (above).
 // The Anthropic API key stays on the device only — never uploaded.
 
-// AI settings — your own Anthropic API key, kept only on this device.
+// AI settings — keys stay only on this device. Both providers can be filled in
+// at once; "auto" picks the cheapest capable one per task automatically.
 const getKey = () => { try { return localStorage.getItem("pp_api_key") || ""; } catch (_) { return ""; } };
-const getModel = () => { try { return localStorage.getItem("pp_model") || "claude-sonnet-5"; } catch (_) { return "claude-sonnet-5"; } };
+const getGeminiKey = () => { try { return localStorage.getItem("pp_gemini_key") || ""; } catch (_) { return ""; } };
+const getProvider = () => { try { return localStorage.getItem("pp_provider") || "auto"; } catch (_) { return "auto"; } };
+
+// Two cost tiers per provider: "light" (scans, recipe steps — cheap/fast models
+// are plenty) and "heavy" (the big ~40-dish generation, which benefits from a
+// stronger model). Defaults favour the cheapest model that's still reliable.
+const getModelLight = () => { try { return localStorage.getItem("pp_model_light") || "claude-haiku-4-5-20251001"; } catch (_) { return "claude-haiku-4-5-20251001"; } };
+const getModelHeavy = () => { try { return localStorage.getItem("pp_model_heavy") || "claude-sonnet-5"; } catch (_) { return "claude-sonnet-5"; } };
+const getGeminiModelLight = () => { try { return localStorage.getItem("pp_gemini_model_light") || "gemini-2.5-flash"; } catch (_) { return "gemini-2.5-flash"; } };
+const getGeminiModelHeavy = () => { try { return localStorage.getItem("pp_gemini_model_heavy") || "gemini-2.5-pro"; } catch (_) { return "gemini-2.5-pro"; } };
+
+// Decide which provider actually handles a given call, respecting the user's
+// preference but falling back sensibly, and — in "auto" — favouring the
+// cheaper Gemini key for light everyday tasks to keep token spend down.
+function pickProvider(tier) {
+  const pref = getProvider();
+  const hasA = !!getKey(), hasG = !!getGeminiKey();
+  if (!hasA && !hasG) return null;
+  if (pref === "anthropic") return hasA ? "anthropic" : "gemini";
+  if (pref === "gemini") return hasG ? "gemini" : "anthropic";
+  // auto: cheap tier prefers whichever is set up, leaning Gemini (usually free/cheaper);
+  // heavy tier leans Claude for quality on the big suggestion list, falling back otherwise.
+  if (tier === "light") return hasG ? "gemini" : "anthropic";
+  return hasA ? "anthropic" : "gemini";
+}
 
 /* ─────────────────────────────  Claude AI  ────────────────────────────── */
 
-async function callClaude({ system, user, image, maxTokens = 2048 }) {
-  const key = getKey();
-  if (!key) { const e = new Error("Add your Anthropic API key in Settings to use AI features."); e.code = "NO_KEY"; throw e; }
-  const content = image
-    ? [{ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }, { type: "text", text: user }]
-    : user;
+const aiReady = () => !!AI_PROXY_URL || !!getKey() || !!getGeminiKey();
+
+async function callGemini({ system, user, images, maxTokens, tier }) {
+  const key = getGeminiKey();
+  if (!key) { const e = new Error("Add your Gemini API key in Settings to use AI features."); e.code = "NO_KEY"; throw e; }
+  const parts = [{ text: user }];
+  for (const img of (images || [])) parts.unshift({ inline_data: { mime_type: img.mediaType, data: img.data } });
+  const model = tier === "heavy" ? getGeminiModelHeavy() : getGeminiModelLight();
+  const body = {
+    contents: [{ role: "user", parts }],
+    systemInstruction: system ? { parts: [{ text: system }] } : undefined,
+    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
+  };
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 90000);
+  const timer = setTimeout(() => ctrl.abort(), 120000);
   let res;
   try {
-    res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({ model: getModel(), max_tokens: maxTokens, system, messages: [{ role: "user", content }] }),
-    });
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+      { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    );
   } catch (e) {
-    throw new Error(e.name === "AbortError" ? "The request timed out. Check your connection and try again." : "Couldn't reach Anthropic. Check your internet connection.");
+    throw new Error(e.name === "AbortError" ? "The request timed out. Check your connection and try again." : "Couldn't reach Gemini. Check your connection.");
+  } finally { clearTimeout(timer); }
+  if (!res.ok) {
+    let msg = "Gemini request failed (" + res.status + ")";
+    try { const jr = await res.json(); if (jr.error && jr.error.message) msg = jr.error.message; } catch (_) {}
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  const cand = (data.candidates || [])[0];
+  return ((cand && cand.content && cand.content.parts) || []).map((p) => p.text || "").join("\n");
+}
+
+// Central AI entry point. `tier` is "light" (scans, recipe steps — cheap/fast
+// models are plenty) or "heavy" (the big ~40-dish list, worth a stronger model).
+// `images` is an array so multiple photos can be analysed together in one call.
+async function callClaude({ system, user, images, maxTokens = 2048, tier = "light" }) {
+  const provider = AI_PROXY_URL ? "anthropic" : pickProvider(tier);
+  if (!provider) { const e = new Error("Add an Anthropic or Gemini API key in Settings to use AI features."); e.code = "NO_KEY"; throw e; }
+  if (!AI_PROXY_URL && provider === "gemini") return callGemini({ system, user, images, maxTokens, tier });
+
+  const imgBlocks = (images || []).map((img) => ({ type: "image", source: { type: "base64", media_type: img.mediaType, data: img.data } }));
+  const content = imgBlocks.length ? [...imgBlocks, { type: "text", text: user }] : user;
+  const model = AI_PROXY_URL ? undefined : (tier === "heavy" ? getModelHeavy() : getModelLight());
+  const payload = { model, max_tokens: maxTokens, system, messages: [{ role: "user", content }] };
+
+  let url, headers;
+  if (AI_PROXY_URL) {
+    // Shared mode: call our Worker, proving who we are with the Google login token.
+    let token = null;
+    try { if (auth && auth.currentUser) token = await auth.currentUser.getIdToken(); } catch (_) {}
+    url = AI_PROXY_URL;
+    headers = { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) };
+  } else {
+    // Personal mode: call Anthropic directly with the user's own key.
+    const key = getKey();
+    url = "https://api.anthropic.com/v1/messages";
+    headers = {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    };
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", signal: ctrl.signal, headers, body: JSON.stringify(payload) });
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? "The request timed out. Check your connection and try again." : "Couldn't reach the AI service. Check your connection.");
   } finally {
     clearTimeout(timer);
   }
   if (!res.ok) {
     let msg = "AI request failed (" + res.status + ")";
-    try { const j = await res.json(); if (j.error && j.error.message) msg = j.error.message; } catch (_) {}
+    try { const jr = await res.json(); if (jr.error && jr.error.message) msg = jr.error.message; } catch (_) {}
     throw new Error(msg);
   }
   const data = await res.json();
@@ -189,20 +271,25 @@ function parseJSON(text) {
   throw new Error("Could not read the AI response. Please try again.");
 }
 
-async function extractFromImage(image, mode) {
+async function extractFromImage(images, mode) {
   const receipt = mode === "receipt";
+  const multi = images.length > 1;
   const system =
     "You read food and grocery photos. Return ONLY valid JSON, no prose, no markdown fences. " +
     `Categories must be one of: ${CATEGORIES.join(", ")}.`;
   const user = receipt
-    ? 'This is a grocery store receipt. Extract the store, purchase date, total, and every food/household line item. ' +
+    ? `You are given ${images.length} photo${multi ? "s of the same receipt or shopping trip (pages/angles)" : " of a receipt"}. ` +
+      (multi ? "Combine everything into ONE list — do not duplicate an item that appears in more than one photo. " : "") +
+      'Extract the store, purchase date, total, and every food/household line item. ' +
       'Return: {"store": string|null, "date": "YYYY-MM-DD"|null, "total": number|null, ' +
       '"items":[{"name": string, "category": string, "quantity": number, "unit": string, "price": number|null, "confidence": "high"|"medium"|"low"}]}. ' +
       "Use a clean product name (not the receipt abbreviation) where you can. Skip tax, subtotal, discounts, and non-item lines."
-    : "This is a photo of groceries. Identify each distinct food/household item. " +
+    : `You are given ${images.length} photo${multi ? "s of groceries — possibly the same haul from different angles or separate batches" : " of groceries"}. ` +
+      (multi ? "Combine everything into ONE list — if the same item appears in more than one photo, list it once with a combined quantity, not duplicated. " : "") +
+      "Identify each distinct food/household item. " +
       'Return: {"store": null, "date": null, "total": null, ' +
       '"items":[{"name": string, "category": string, "quantity": number, "unit": string, "price": null, "confidence": "high"|"medium"|"low"}]}.';
-  const out = parseJSON(await callClaude({ system, user, image }));
+  const out = parseJSON(await callClaude({ system, user, images, tier: "light", maxTokens: 3072 }));
   const items = (out.items || []).map((it) => ({
     name: String(it.name || "").trim(),
     category: CATEGORIES.includes(it.category) ? it.category : "Other",
@@ -229,7 +316,7 @@ async function suggestMeals(pantry) {
     'Return {"meals":[{"name": string, "type": "breakfast"|"lunch"|"dinner"|"dessert", ' +
     '"description": string (max 10 words), "ingredients": [string], "servings": number}]}. ' +
     "Keep ingredient names simple and singular. Do NOT include cooking steps.";
-  const raw = await callClaude({ system, user, maxTokens: 4096 });
+  const raw = await callClaude({ system, user, maxTokens: 4096, tier: "heavy" });
   let list = [];
   try { const out = parseJSON(raw); list = out.meals || []; }
   catch (_) { const lb = raw.indexOf("["); list = extractObjects(lb === -1 ? raw : raw.slice(lb)); }
@@ -251,7 +338,7 @@ async function generateSteps(meal) {
   const user =
     `Dish: ${meal.name}. Ingredients: ${(meal.ingredients || []).join(", ") || "common pantry items"}. Servings: ${meal.servings || 2}. ` +
     'Give between 3 and 10 short steps, each a single clear sentence. Return {"steps": [string, ...]}.';
-  const out = parseJSON(await callClaude({ system, user, maxTokens: 1024 }));
+  const out = parseJSON(await callClaude({ system, user, maxTokens: 1024, tier: "light" }));
   let steps = Array.isArray(out.steps) ? out.steps.map((s) => String(s).trim()).filter(Boolean) : [];
   return steps.slice(0, 10);
 }
@@ -348,24 +435,26 @@ function SectionTitle({ children, right }) {
 }
 
 /* ─────────────────────────────  image picker  ─────────────────────────── */
+// Always resolves an array of {data, mediaType} — one photo or a whole batch,
+// so callers can send several images to the AI in a single analysis pass.
 
 function usePhoto() {
   const inputRef = useRef(null);
   const resolver = useRef(null);
   const node = (
-    <input ref={inputRef} type="file" accept="image/*" className="hidden"
+    <input ref={inputRef} type="file" accept="image/*" multiple className="hidden"
       onChange={(e) => {
-        const file = e.target.files && e.target.files[0];
+        const files = Array.from(e.target.files || []);
         e.target.value = "";
-        if (!file || !resolver.current) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          const data = String(reader.result).split(",")[1];
-          resolver.current({ data, mediaType: file.type || "image/jpeg" });
-          resolver.current = null;
-        };
-        reader.onerror = () => { resolver.current(null); resolver.current = null; };
-        reader.readAsDataURL(file);
+        const resolve = resolver.current;
+        resolver.current = null;
+        if (!files.length || !resolve) { resolve && resolve([]); return; }
+        Promise.all(files.map((file) => new Promise((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res({ data: String(reader.result).split(",")[1], mediaType: file.type || "image/jpeg" });
+          reader.onerror = () => rej(new Error("read failed"));
+          reader.readAsDataURL(file);
+        }))).then(resolve).catch(() => resolve([]));
       }} />
   );
   const pick = () => new Promise((res) => { resolver.current = res; inputRef.current && inputRef.current.click(); });
@@ -543,24 +632,28 @@ function InventoryTab() {
 /* ─────────────────────────────  Scan tab  ─────────────────────────────── */
 
 function ScanTab({ openSettings }) {
-  const { addOrMerge, notify } = useApp();
+  const { pantry, addOrMerge, replacePantry, notify } = useApp();
   const { node, pick } = usePhoto();
   const [busy, setBusy] = useState(false);
+  const [busyCount, setBusyCount] = useState(0);
   const [err, setErr] = useState("");
-  const [items, setItems] = useState(null);
   const [paste, setPaste] = useState(false);
-  const hasKey = !!getKey();
+  const [result, setResult] = useState(null);   // { items, added, undoSnapshot } after auto-commit
+  const hasKey = aiReady();
 
   const run = async (mode) => {
-    setErr(""); setItems(null);
-    if (!getKey()) { setErr("Photo scanning uses AI, which needs your Anthropic API key. Tap the gear (⚙️) to add it — or use “Paste a list” below to add items without AI."); return; }
-    const img = await pick();          // opens camera OR gallery
-    if (!img) return;                  // cancelled
-    setBusy(true);
+    setErr(""); setResult(null);
+    if (!aiReady()) { setErr("Photo scanning uses AI, which needs an API key. Tap the gear (⚙️) to add one — or use “Paste a list” below to add items without AI."); return; }
+    const imgs = await pick();                 // opens gallery — pick one or several at once
+    if (!imgs.length) return;                   // cancelled
+    setBusyCount(imgs.length); setBusy(true);
     try {
-      const res = await extractFromImage(img, mode);
-      if (!res.items.length) throw new Error("No items found. Try a clearer, flatter, well-lit photo.");
-      setItems(res.items);
+      const res = await extractFromImage(imgs, mode);   // all photos analysed together, one AI call
+      if (!res.items.length) throw new Error("No items found. Try clearer, well-lit photos.");
+      const before = pantry;                      // snapshot for undo
+      const added = addOrMerge(res.items);
+      setResult({ items: res.items, added, undoSnapshot: before });
+      notify(`${added} item${added > 1 ? "s" : ""} added to inventory`);
     } catch (e) { setErr(e.message || "Scan failed. Please try again."); }
     finally { setBusy(false); }
   };
@@ -568,98 +661,81 @@ function ScanTab({ openSettings }) {
   const addPasted = (text) => {
     const parsed = parseBulk(text);
     if (!parsed.length) { setErr("Type at least one item, e.g. “Okra 2”."); return; }
-    setItems(parsed);
+    const before = pantry;
+    const added = addOrMerge(parsed);
+    setResult({ items: parsed, added, undoSnapshot: before });
+    notify(`${added} item${added > 1 ? "s" : ""} added to inventory`);
     setPaste(false);
   };
 
-  const edit = (idx, k, v) => setItems((s) => s.map((it, i) => i === idx ? { ...it, [k]: v } : it));
-  const drop = (idx) => setItems((s) => s.filter((_, i) => i !== idx));
-  const commit = () => {
-    const n = addOrMerge(items);
-    notify(`${n} item${n > 1 ? "s" : ""} added to inventory`);
-    setItems(null);
+  const undo = () => {
+    if (!result) return;
+    replacePantry(result.undoSnapshot);
+    notify("Undone");
+    setResult(null);
   };
 
   return (
     <div className="px-4 pt-2 pb-4">
       {node}
-      {!items && (
-        <>
-          <div className="rounded-3xl bg-gradient-to-br from-emerald-700 to-emerald-900 text-white p-6 text-center relative overflow-hidden">
-            <div className="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-white/10" />
-            <div className="absolute -left-8 -bottom-8 h-28 w-28 rounded-full bg-white/5" />
-            <div className="relative">
-              <div className="mx-auto h-14 w-14 rounded-2xl bg-white/15 grid place-items-center mb-3"><Camera size={26} /></div>
-              <h2 className="text-xl font-bold" style={{ fontFamily: HEAD }}>Fill your inventory fast</h2>
-              <p className="text-emerald-100/90 text-sm mt-1 max-w-xs mx-auto">Photograph a receipt or your groceries, or paste a list. Everything gets added at once.</p>
-            </div>
+      <div className="rounded-3xl bg-gradient-to-br from-emerald-700 to-emerald-900 text-white p-6 text-center relative overflow-hidden">
+        <div className="absolute -right-6 -top-6 h-24 w-24 rounded-full bg-white/10" />
+        <div className="absolute -left-8 -bottom-8 h-28 w-28 rounded-full bg-white/5" />
+        <div className="relative">
+          <div className="mx-auto h-14 w-14 rounded-2xl bg-white/15 grid place-items-center mb-3"><Camera size={26} /></div>
+          <h2 className="text-xl font-bold" style={{ fontFamily: HEAD }}>Fill your inventory fast</h2>
+          <p className="text-emerald-100/90 text-sm mt-1 max-w-xs mx-auto">Pick one photo or several at once — everything gets analysed together and added straight to inventory.</p>
+        </div>
+      </div>
+
+      {!hasKey && (
+        <button onClick={openSettings} className="mt-4 w-full flex items-center gap-2 rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2.5 text-sm text-amber-800 text-left">
+          <KeyRound size={16} className="shrink-0" /> <span>Photo scanning needs an API key. <b>Tap to add one.</b> Or paste a list below — no key needed.</span>
+        </button>
+      )}
+      {err && <div className="mt-4 flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2.5 text-sm text-rose-700"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {err}</div>}
+
+      <div className="grid grid-cols-2 gap-3 mt-4">
+        <button disabled={busy} onClick={() => run("receipt")} className="rounded-2xl bg-white ring-1 ring-stone-200 p-5 text-center hover:ring-emerald-300 hover:shadow-sm transition disabled:opacity-50">
+          <Receipt size={24} className="mx-auto text-emerald-700 mb-2" />
+          <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>Scan receipt(s)</p>
+          <p className="text-xs text-stone-400 mt-0.5">Multi-page OK — pick several</p>
+        </button>
+        <button disabled={busy} onClick={() => run("groceries")} className="rounded-2xl bg-white ring-1 ring-stone-200 p-5 text-center hover:ring-emerald-300 hover:shadow-sm transition disabled:opacity-50">
+          <ImagePlus size={24} className="mx-auto text-emerald-700 mb-2" />
+          <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>Snap groceries</p>
+          <p className="text-xs text-stone-400 mt-0.5">Select the whole batch at once</p>
+        </button>
+      </div>
+
+      <button disabled={busy} onClick={() => { setErr(""); setResult(null); setPaste(true); }} className="mt-3 w-full rounded-2xl bg-stone-800 text-white p-4 flex items-center justify-center gap-2 font-semibold active:scale-[.99] transition disabled:opacity-50">
+        <ClipboardList size={18} /> Paste a list  <span className="text-stone-400 font-normal text-sm">· no key needed</span>
+      </button>
+
+      {busy && (
+        <div className="mt-6 flex flex-col items-center gap-2 text-amber-600">
+          <Loader2 size={26} className="animate-spin" />
+          <p className="text-sm font-semibold">Analysing {busyCount > 1 ? `${busyCount} photos together` : "your photo"}…</p>
+        </div>
+      )}
+
+      {result && (
+        <div className="mt-5 rounded-2xl bg-white ring-1 ring-emerald-200 p-4">
+          <div className="flex items-center justify-between">
+            <p className="font-bold text-emerald-700 flex items-center gap-1.5" style={{ fontFamily: HEAD }}><CircleCheck size={17} /> Added to inventory</p>
+            <button onClick={undo} className="text-xs font-bold text-stone-400 hover:text-rose-600 flex items-center gap-1"><RotateCcw size={12} /> Undo</button>
           </div>
-
-          {!hasKey && (
-            <button onClick={openSettings} className="mt-4 w-full flex items-center gap-2 rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2.5 text-sm text-amber-800 text-left">
-              <KeyRound size={16} className="shrink-0" /> <span>Photo scanning needs your API key. <b>Tap to add it.</b> Or paste a list below — no key needed.</span>
-            </button>
-          )}
-          {err && <div className="mt-4 flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2.5 text-sm text-rose-700"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {err}</div>}
-
-          <div className="grid grid-cols-2 gap-3 mt-4">
-            <button disabled={busy} onClick={() => run("receipt")} className="rounded-2xl bg-white ring-1 ring-stone-200 p-5 text-center hover:ring-emerald-300 hover:shadow-sm transition disabled:opacity-50">
-              <Receipt size={24} className="mx-auto text-emerald-700 mb-2" />
-              <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>Scan receipt</p>
-              <p className="text-xs text-stone-400 mt-0.5">All line items at once</p>
-            </button>
-            <button disabled={busy} onClick={() => run("groceries")} className="rounded-2xl bg-white ring-1 ring-stone-200 p-5 text-center hover:ring-emerald-300 hover:shadow-sm transition disabled:opacity-50">
-              <ImagePlus size={24} className="mx-auto text-emerald-700 mb-2" />
-              <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>Snap groceries</p>
-              <p className="text-xs text-stone-400 mt-0.5">Identify what's in view</p>
-            </button>
+          <div className="flex flex-wrap gap-1.5 mt-2.5">
+            {result.items.map((it, i) => (
+              <span key={i} className="text-xs bg-emerald-50 text-emerald-700 ring-1 ring-emerald-600/15 rounded-md px-2 py-1">{CAT_EMOJI[it.category] || "📦"} {it.name} ×{it.quantity}</span>
+            ))}
           </div>
-
-          <button disabled={busy} onClick={() => { setErr(""); setPaste(true); }} className="mt-3 w-full rounded-2xl bg-stone-800 text-white p-4 flex items-center justify-center gap-2 font-semibold active:scale-[.99] transition disabled:opacity-50">
-            <ClipboardList size={18} /> Paste a list  <span className="text-stone-400 font-normal text-sm">· no key needed</span>
-          </button>
-
-          {busy && (
-            <div className="mt-6 flex flex-col items-center gap-2 text-amber-600">
-              <Loader2 size={26} className="animate-spin" />
-              <p className="text-sm font-semibold">Reading your photo…</p>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
       <Sheet open={paste} onClose={() => setPaste(false)} title="Paste a list">
         <BulkPaste onAdd={addPasted} onClose={() => setPaste(false)} />
       </Sheet>
-
-      {items && (
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-lg font-bold text-stone-800" style={{ fontFamily: HEAD }}>Review {items.length} item{items.length > 1 ? "s" : ""}</h2>
-              <p className="text-xs text-stone-500">Tweak anything, then add to your inventory.</p>
-            </div>
-            <button onClick={() => setItems(null)} className="text-sm font-semibold text-stone-500">Cancel</button>
-          </div>
-          <div className="space-y-2">
-            {items.map((it, i) => (
-              <div key={i} className="rounded-2xl bg-white ring-1 ring-stone-200 p-3">
-                <div className="flex items-center gap-2">
-                  <input value={it.name} onChange={(e) => edit(i, "name", e.target.value)} className="flex-1 font-bold text-stone-800 bg-transparent outline-none border-b border-transparent focus:border-emerald-400" style={{ fontFamily: HEAD }} />
-                  <ConfBadge c={it.confidence} />
-                  <button onClick={() => drop(i)} className="h-7 w-7 grid place-items-center rounded-lg text-stone-400 hover:bg-rose-50 hover:text-rose-600"><X size={15} /></button>
-                </div>
-                <div className="grid grid-cols-3 gap-2 mt-2">
-                  <select value={it.category} onChange={(e) => edit(i, "category", e.target.value)} className="h-9 px-2 rounded-lg bg-stone-50 ring-1 ring-stone-200 text-sm text-stone-600">{CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select>
-                  <input type="number" min="0" value={it.quantity} onChange={(e) => edit(i, "quantity", Number(e.target.value))} className="h-9 px-2 rounded-lg bg-stone-50 ring-1 ring-stone-200 text-sm text-center" />
-                  <input value={it.unit} onChange={(e) => edit(i, "unit", e.target.value)} className="h-9 px-2 rounded-lg bg-stone-50 ring-1 ring-stone-200 text-sm text-center" />
-                </div>
-              </div>
-            ))}
-          </div>
-          <Btn className="w-full mt-4" onClick={commit}><Plus size={18} /> Add {items.length} to inventory</Btn>
-        </div>
-      )}
     </div>
   );
 }
@@ -701,7 +777,7 @@ const TYPE_META = {
   dessert: { label: "Dessert", icon: "🍮" },
 };
 
-function MealCard({ meal, pantry, onOpen, onSave, onPlan, planned }) {
+function MealCard({ meal, pantry, onOpen, onSave, onPlan, planned, planning }) {
   const mm = mealMatch(meal, pantry);
   return (
     <div className="rounded-2xl bg-white ring-1 ring-stone-200 overflow-hidden">
@@ -730,7 +806,9 @@ function MealCard({ meal, pantry, onOpen, onSave, onPlan, planned }) {
       </button>
       <div className="flex gap-2 px-4 pb-3">
         {onSave && <Btn size="sm" variant="soft" className="flex-1" onClick={onSave}><Star size={14} /> Save</Btn>}
-        <Btn size="sm" className="flex-1" onClick={onPlan}><CalendarPlus size={14} /> Plan today</Btn>
+        <Btn size="sm" className="flex-1" onClick={onPlan} disabled={planning}>
+          {planning ? <Loader2 size={14} className="animate-spin" /> : <CalendarPlus size={14} />} {planning ? "Prepping recipe…" : "Plan today"}
+        </Btn>
       </div>
     </div>
   );
@@ -782,14 +860,29 @@ function RecipeSheet({ dish, pantry, steps, loading, err, onSave, onPlan, planne
 }
 
 function MealsTab() {
-  const { pantry, meals, addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, notify } = useApp();
-  const [busy, setBusy] = useState(false);
+  const { pantry, meals, ideas, setIdeas, ideasSig, setIdeasSig, addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, notify } = useApp();
+  const [busy, setBusy] = useState(false);      // true only for the first, explicit generate
+  const [refreshing, setRefreshing] = useState(false); // true for silent background auto-refresh
   const [err, setErr] = useState("");
-  const [ideas, setIdeas] = useState([]);
   const [manual, setManual] = useState(false);
   const [section, setSection] = useState("all");
   const [open, setOpen] = useState(null);            // dish currently shown in recipe sheet
   const [stepCache, setStepCache] = useState({});    // name -> {steps,loading,err}
+  const [planning, setPlanning] = useState(null);    // name of dish currently being planned (preloading steps)
+  const refreshTimer = useRef(null);
+
+  const fetchStepsFor = async (dish, mealId) => {
+    setStepCache((c) => ({ ...c, [dish.name]: { loading: true } }));
+    try {
+      const steps = await generateSteps(dish);
+      setStepCache((c) => ({ ...c, [dish.name]: { steps } }));
+      if (mealId) setMealSteps(mealId, steps);
+      return steps;
+    } catch (e) {
+      setStepCache((c) => ({ ...c, [dish.name]: { err: e.message || "Couldn't write the recipe." } }));
+      return null;
+    }
+  };
 
   const generate = async () => {
     setErr(""); setBusy(true);
@@ -797,29 +890,53 @@ function MealsTab() {
       const res = await suggestMeals(pantry);
       if (!res.length) throw new Error("No suggestions came back. Try again.");
       setIdeas(res);
+      setIdeasSig(pantrySig(pantry));
     } catch (e) { setErr(e.message || "Couldn't get suggestions."); }
     finally { setBusy(false); }
   };
 
-  const saveIdea = (m, schedule) => {
-    addMeal({ ...m, favorite: false, scheduledDate: schedule ? todayISO() : null, steps: stepCache[m.name]?.steps || null });
-    notify(schedule ? "Added to today's plan" : "Saved to meals");
+  // Auto-refresh in the background whenever the pantry changes — old suggestions
+  // stay on screen the whole time, only swapped once fresh ones arrive.
+  useEffect(() => {
+    if (!ideas.length || busy || refreshing) return;
+    const sig = pantrySig(pantry);
+    if (sig === ideasSig) return;
+    clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(async () => {
+      if (!aiReady()) return; // silently skip if no key/proxy configured
+      setRefreshing(true);
+      try {
+        const res = await suggestMeals(pantry);
+        if (res.length) { setIdeas(res); setIdeasSig(pantrySig(pantry)); }
+      } catch (_) { /* stay on old suggestions rather than error the user for a background refresh */ }
+      finally { setRefreshing(false); }
+    }, 2500);
+    return () => clearTimeout(refreshTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pantry, ideas.length, ideasSig]);
+
+  // Saving/planning a dish. When scheduling for today, preload the recipe steps
+  // right away — since it's already intended to be cooked, no extra tap needed.
+  const saveIdea = async (m, schedule) => {
+    let steps = stepCache[m.name]?.steps || null;
+    if (schedule && !steps) { setPlanning(m.name); steps = await fetchStepsFor(m); setPlanning(null); }
+    addMeal({ ...m, favorite: false, scheduledDate: schedule ? todayISO() : null, steps });
+    notify(schedule ? "Planned for today · recipe ready" : "Saved to meals");
     setIdeas((s) => s.filter((x) => x.name !== m.name));
   };
 
-  // open recipe + lazily fetch steps
+  const planSavedToday = async (m) => {
+    scheduleMeal(m.id, todayISO());
+    if (!m.steps) { setPlanning(m.name); await fetchStepsFor(m, m.id); setPlanning(null); }
+    notify("Planned for today · recipe ready");
+  };
+
+  // open recipe + lazily fetch steps (used for "just browsing", not planning)
   const openRecipe = async (dish, mealId) => {
     setOpen({ ...dish, mealId });
     const cached = (mealId && dish.steps) ? dish.steps : stepCache[dish.name]?.steps;
     if (cached && cached.length) { setStepCache((c) => ({ ...c, [dish.name]: { steps: cached } })); return; }
-    setStepCache((c) => ({ ...c, [dish.name]: { loading: true } }));
-    try {
-      const steps = await generateSteps(dish);
-      setStepCache((c) => ({ ...c, [dish.name]: { steps } }));
-      if (mealId) setMealSteps(mealId, steps);          // persist for saved meals
-    } catch (e) {
-      setStepCache((c) => ({ ...c, [dish.name]: { err: e.message || "Couldn't write the recipe." } }));
-    }
+    await fetchStepsFor(dish, mealId);
   };
 
   // combine AI ideas + saved meals for browsing; saved meals flagged
@@ -850,6 +967,7 @@ function MealsTab() {
       </button>
       {err && <div className="mt-3 flex items-center gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2 text-sm text-rose-700"><AlertTriangle size={16} /> {err}</div>}
       {busy && <p className="text-center text-sm text-amber-600 mt-3 flex items-center justify-center gap-1"><Loader2 size={14} className="animate-spin" /> Cooking up ~40 dishes…</p>}
+      {refreshing && <p className="text-center text-xs text-stone-400 mt-3 flex items-center justify-center gap-1"><Loader2 size={12} className="animate-spin" /> New items detected — quietly refreshing ideas…</p>}
 
       {/* section filter */}
       {browse.length > 0 && (
@@ -870,17 +988,17 @@ function MealsTab() {
         <div className="mt-3 space-y-2">
           {ready.length > 0 && <p className="text-[13px] font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1 mt-1"><CircleCheck size={14} /> Ready to cook</p>}
           {ready.map(({ m }) => (
-            <MealCard key={(m.id || m.name)} meal={m} pantry={pantry} planned={m.planned}
+            <MealCard key={(m.id || m.name)} meal={m} pantry={pantry} planned={m.planned} planning={planning === m.name}
               onOpen={() => openRecipe(m, m._saved ? m.id : null)}
               onSave={m._saved ? null : () => saveIdea(m, false)}
-              onPlan={() => { m._saved ? scheduleMeal(m.id, todayISO()) : saveIdea(m, true); notify("Planned for today"); }} />
+              onPlan={() => (m._saved ? planSavedToday(m) : saveIdea(m, true))} />
           ))}
           {needMore.length > 0 && <p className="text-[13px] font-bold uppercase tracking-wider text-amber-600 flex items-center gap-1 mt-4"><ShoppingCart size={14} /> Need a few more items</p>}
           {needMore.map(({ m }) => (
-            <MealCard key={(m.id || m.name)} meal={m} pantry={pantry} planned={m.planned}
+            <MealCard key={(m.id || m.name)} meal={m} pantry={pantry} planned={m.planned} planning={planning === m.name}
               onOpen={() => openRecipe(m, m._saved ? m.id : null)}
               onSave={m._saved ? null : () => saveIdea(m, false)}
-              onPlan={() => { m._saved ? scheduleMeal(m.id, todayISO()) : saveIdea(m, true); notify("Planned for today"); }} />
+              onPlan={() => (m._saved ? planSavedToday(m) : saveIdea(m, true))} />
           ))}
         </div>
       )}
@@ -912,7 +1030,7 @@ function MealsTab() {
         <RecipeSheet dish={open} pantry={pantry} steps={openStep.steps} loading={openStep.loading} err={openStep.err}
           planned={open?.mealId ? meals.find((x) => x.id === open.mealId)?.scheduledDate : false}
           onSave={open && !open.mealId ? () => { saveIdea(open, false); setOpen(null); } : null}
-          onPlan={() => { open.mealId ? scheduleMeal(open.mealId, todayISO()) : saveIdea(open, true); notify("Planned for today"); setOpen(null); }} />
+          onPlan={() => { (open.mealId ? planSavedToday(meals.find((x) => x.id === open.mealId)) : saveIdea(open, true)); setOpen(null); }} />
       </Sheet>
 
       <Sheet open={manual} onClose={() => setManual(false)} title="Add a meal">
@@ -948,8 +1066,52 @@ function ManualMeal({ onSave, onClose }) {
 
 /* ─────────────────────────────  Planner tab  ──────────────────────────── */
 
+// Swipe right to bump servings (1→2→3…), swipe left to delete the planned meal.
+function PlannedMealRow({ meal, onServings, onReschedule, onUnschedule, onDelete }) {
+  const [dx, setDx] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const start = useRef(0);
+  const TH = 56;
+
+  const down = (e) => { start.current = e.clientX; setDragging(true); e.currentTarget.setPointerCapture(e.pointerId); };
+  const move = (e) => { if (!dragging) return; setDx(Math.max(-96, Math.min(96, e.clientX - start.current))); };
+  const up = () => {
+    if (dx >= TH) onServings(+1);
+    else if (dx <= -TH) onDelete();
+    setDx(0); setDragging(false);
+  };
+
+  return (
+    <div className="relative overflow-hidden rounded-xl ml-2">
+      <div className="absolute inset-0 flex items-center justify-between px-4 text-white font-bold text-sm">
+        <span className={`flex items-center gap-1 transition-opacity ${dx > 8 ? "opacity-100" : "opacity-0"}`}><Plus size={16} /> +1 serving</span>
+        <span className={`flex items-center gap-1 transition-opacity ${dx < -8 ? "opacity-100" : "opacity-0"}`}>Delete <Trash2 size={16} /></span>
+      </div>
+      <div className="absolute inset-0 flex">
+        <div className="flex-1 bg-emerald-500" style={{ opacity: Math.max(0, dx) / 96 }} />
+        <div className="flex-1 bg-rose-500" style={{ opacity: Math.max(0, -dx) / 96 }} />
+      </div>
+      <div className="relative bg-white ring-1 ring-stone-200 p-3 flex items-center gap-3 touch-pan-y"
+        style={{ transform: `translateX(${dx}px)`, transition: dragging ? "none" : "transform .18s ease" }}
+        onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
+        <Utensils size={16} className="text-emerald-600 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-stone-800 truncate">{meal.name}</p>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <button onClick={() => onServings(-1)} className="h-5 w-5 grid place-items-center rounded bg-stone-100 text-stone-500"><Minus size={11} /></button>
+            <span className="text-xs text-stone-400 tabular-nums w-16">{meal.servings} servings</span>
+            <button onClick={() => onServings(+1)} className="h-5 w-5 grid place-items-center rounded bg-stone-100 text-stone-500"><Plus size={11} /></button>
+          </div>
+        </div>
+        <button onClick={onReschedule} className="h-8 w-8 grid place-items-center rounded-lg text-stone-400 hover:bg-stone-100 shrink-0"><CalendarDays size={15} /></button>
+        <button onClick={onUnschedule} className="h-8 w-8 grid place-items-center rounded-lg text-stone-400 hover:bg-stone-100 shrink-0"><RotateCcw size={15} /></button>
+      </div>
+    </div>
+  );
+}
+
 function PlannerTab() {
-  const { meals, scheduleMeal, removeMeal, notify } = useApp();
+  const { meals, scheduleMeal, removeMeal, setMealServings, notify } = useApp();
   const [picking, setPicking] = useState(null); // meal being scheduled
 
   const scheduled = meals.filter((m) => m.scheduledDate);
@@ -975,6 +1137,7 @@ function PlannerTab() {
       {dates.length > 0 && (
         <div>
           <SectionTitle>Scheduled</SectionTitle>
+          <p className="text-xs text-stone-400 -mt-2 mb-2">Swipe a meal right to add a serving · left to delete</p>
           <div className="space-y-4">
             {dates.map((iso) => (
               <div key={iso}>
@@ -984,15 +1147,11 @@ function PlannerTab() {
                 </div>
                 <div className="space-y-2 pl-2 border-l-2 border-stone-200 ml-4">
                   {groups[iso].map((m) => (
-                    <div key={m.id} className="rounded-xl bg-white ring-1 ring-stone-200 p-3 flex items-center gap-3 ml-2">
-                      <Utensils size={16} className="text-emerald-600 shrink-0" />
-                      <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-stone-800 truncate">{m.name}</p>
-                        <p className="text-xs text-stone-400">{m.servings} servings</p>
-                      </div>
-                      <button onClick={() => setPicking(m)} className="h-8 w-8 grid place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><CalendarDays size={15} /></button>
-                      <button onClick={() => { scheduleMeal(m.id, null); notify("Moved to ideas"); }} className="h-8 w-8 grid place-items-center rounded-lg text-stone-400 hover:bg-stone-100"><RotateCcw size={15} /></button>
-                    </div>
+                    <PlannedMealRow key={m.id} meal={m}
+                      onServings={(d) => setMealServings(m.id, d)}
+                      onReschedule={() => setPicking(m)}
+                      onUnschedule={() => { scheduleMeal(m.id, null); notify("Moved to ideas"); }}
+                      onDelete={() => { removeMeal(m.id); notify("Meal deleted"); }} />
                   ))}
                 </div>
               </div>
@@ -1079,11 +1238,11 @@ function ShoppingTab() {
 
   const scanReceipt = async () => {
     setErr("");
-    const img = await pick();
-    if (!img) return;
+    const imgs = await pick();          // supports multiple photos (multi-page receipts)
+    if (!imgs.length) return;
     setBusy(true);
     try {
-      const res = await extractFromImage(img, "receipt");
+      const res = await extractFromImage(imgs, "receipt");
       const amt = res.total != null ? res.total : res.items.reduce((a, it) => a + (Number(it.price) || 0), 0);
       setForm({ store: res.store || "", date: res.date || todayISO(), amount: amt ? String(amt.toFixed(2)) : "", notes: "", items: res.items });
     } catch (e) { setErr(e.message || "Couldn't read the receipt."); }
@@ -1199,12 +1358,23 @@ function ShoppingTab() {
 
 function SettingsSheet({ onClose, notify, user, onSignOut }) {
   const [key, setKey] = useState(getKey());
-  const [model, setModel] = useState(getModel());
+  const [modelLight, setModelLight] = useState(getModelLight());
+  const [modelHeavy, setModelHeavy] = useState(getModelHeavy());
+  const [provider, setProvider] = useState(getProvider());
+  const [gkey, setGkey] = useState(getGeminiKey());
+  const [gModelLight, setGModelLight] = useState(getGeminiModelLight());
+  const [gModelHeavy, setGModelHeavy] = useState(getGeminiModelHeavy());
   const [show, setShow] = useState(false);
+  const [showG, setShowG] = useState(false);
   const save = () => {
     try {
+      localStorage.setItem("pp_provider", provider);
       localStorage.setItem("pp_api_key", key.trim());
-      localStorage.setItem("pp_model", (model.trim() || "claude-sonnet-5"));
+      localStorage.setItem("pp_model_light", (modelLight.trim() || "claude-haiku-4-5-20251001"));
+      localStorage.setItem("pp_model_heavy", (modelHeavy.trim() || "claude-sonnet-5"));
+      localStorage.setItem("pp_gemini_key", gkey.trim());
+      localStorage.setItem("pp_gemini_model_light", (gModelLight.trim() || "gemini-2.5-flash"));
+      localStorage.setItem("pp_gemini_model_heavy", (gModelHeavy.trim() || "gemini-2.5-pro"));
     } catch (_) {}
     notify("Settings saved");
     onClose();
@@ -1227,29 +1397,69 @@ function SettingsSheet({ onClose, notify, user, onSignOut }) {
         <ShieldCheck size={16} className="mt-0.5 shrink-0" />
         <span>Your inventory, meals and trips are stored privately in your account — only you can see them.</span>
       </div>
-      <div className="flex items-start gap-2 rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2.5 text-sm text-amber-800">
-        <KeyRound size={16} className="mt-0.5 shrink-0" />
-        <span>Photo scan and meal suggestions use the Anthropic API with <b>your own key</b>, stored on this device only. Paste-list and everything else needs no key.</span>
-      </div>
-      <Field label="Anthropic API key" hint="Starts with sk-ant-…">
-        <div className="relative">
-          <input className={inputCls + " pr-16 font-mono text-sm"} type={show ? "text" : "password"} value={key}
-            onChange={(e) => setKey(e.target.value)} placeholder="sk-ant-..." autoComplete="off" />
-          <button onClick={() => setShow((s) => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-500 px-2 py-1 rounded hover:bg-stone-100">{show ? "Hide" : "Show"}</button>
+      {AI_PROXY_URL ? (
+        <div className="flex items-start gap-2 rounded-xl bg-emerald-50 ring-1 ring-emerald-200 px-3 py-2.5 text-sm text-emerald-800">
+          <Sparkles size={16} className="mt-0.5 shrink-0" />
+          <span>AI photo scan and meal suggestions are <b>ready for everyone</b> — no key needed. Just signing in is enough.</span>
         </div>
-      </Field>
-      <Field label="Model" hint="Change if your account uses a different model id">
-        <TextInput value={model} onChange={(e) => setModel(e.target.value)} placeholder="claude-sonnet-5" />
-      </Field>
-      <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
-        className="text-sm font-semibold text-emerald-700 flex items-center gap-1">
-        Get an API key <ExternalLink size={13} />
-      </a>
+      ) : (
+        <>
+          <div className="flex items-start gap-2 rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2.5 text-sm text-amber-800">
+            <KeyRound size={16} className="mt-0.5 shrink-0" />
+            <span>You can add <b>either or both</b> keys, stored on this device only. <b>Auto</b> uses the cheap/fast model for everyday scans and steps, and only reaches for the stronger model on the big meal-suggestion list — keeping token spend down.</span>
+          </div>
+
+          <Field label="AI provider">
+            <div className="grid grid-cols-3 gap-2">
+              <button onClick={() => setProvider("auto")} className={`h-11 rounded-xl font-semibold text-xs ring-1 ${provider === "auto" ? "bg-emerald-700 text-white ring-emerald-700" : "bg-white text-stone-600 ring-stone-200"}`}>⚡ Auto (smart)</button>
+              <button onClick={() => setProvider("anthropic")} className={`h-11 rounded-xl font-semibold text-xs ring-1 ${provider === "anthropic" ? "bg-emerald-700 text-white ring-emerald-700" : "bg-white text-stone-600 ring-stone-200"}`}>Claude only</button>
+              <button onClick={() => setProvider("gemini")} className={`h-11 rounded-xl font-semibold text-xs ring-1 ${provider === "gemini" ? "bg-emerald-700 text-white ring-emerald-700" : "bg-white text-stone-600 ring-stone-200"}`}>Gemini only</button>
+            </div>
+          </Field>
+
+          <div className="rounded-xl bg-white ring-1 ring-stone-200 p-3 space-y-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Claude (Anthropic)</p>
+            <Field label="API key" hint="Starts with sk-ant-…">
+              <div className="relative">
+                <input className={inputCls + " pr-16 font-mono text-sm"} type={show ? "text" : "password"} value={key}
+                  onChange={(e) => setKey(e.target.value)} placeholder="sk-ant-..." autoComplete="off" />
+                <button onClick={() => setShow((s) => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-500 px-2 py-1 rounded hover:bg-stone-100">{show ? "Hide" : "Show"}</button>
+              </div>
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Cheap model" hint="scans, recipe steps"><TextInput value={modelLight} onChange={(e) => setModelLight(e.target.value)} placeholder="claude-haiku-4-5-20251001" /></Field>
+              <Field label="Full model" hint="~40-dish list"><TextInput value={modelHeavy} onChange={(e) => setModelHeavy(e.target.value)} placeholder="claude-sonnet-5" /></Field>
+            </div>
+            <div className="flex items-center justify-between">
+              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-sm font-semibold text-emerald-700 flex items-center gap-1">Get an API key <ExternalLink size={13} /></a>
+              {getKey() && <button onClick={() => { try { localStorage.removeItem("pp_api_key"); } catch (_) {} setKey(""); notify("Key removed"); }} className="text-xs font-bold text-rose-600">Remove</button>}
+            </div>
+          </div>
+
+          <div className="rounded-xl bg-white ring-1 ring-stone-200 p-3 space-y-3">
+            <p className="text-xs font-bold uppercase tracking-wide text-stone-400">Gemini (Google) · usually cheaper</p>
+            <Field label="API key" hint="From Google AI Studio">
+              <div className="relative">
+                <input className={inputCls + " pr-16 font-mono text-sm"} type={showG ? "text" : "password"} value={gkey}
+                  onChange={(e) => setGkey(e.target.value)} placeholder="AIza..." autoComplete="off" />
+                <button onClick={() => setShowG((s) => !s)} className="absolute right-2 top-1/2 -translate-y-1/2 text-xs font-bold text-stone-500 px-2 py-1 rounded hover:bg-stone-100">{showG ? "Hide" : "Show"}</button>
+              </div>
+            </Field>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Cheap model" hint="scans, recipe steps"><TextInput value={gModelLight} onChange={(e) => setGModelLight(e.target.value)} placeholder="gemini-2.5-flash" /></Field>
+              <Field label="Full model" hint="~40-dish list"><TextInput value={gModelHeavy} onChange={(e) => setGModelHeavy(e.target.value)} placeholder="gemini-2.5-pro" /></Field>
+            </div>
+            <div className="flex items-center justify-between">
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-sm font-semibold text-emerald-700 flex items-center gap-1">Get a free Gemini key <ExternalLink size={13} /></a>
+              {getGeminiKey() && <button onClick={() => { try { localStorage.removeItem("pp_gemini_key"); } catch (_) {} setGkey(""); notify("Key removed"); }} className="text-xs font-bold text-rose-600">Remove</button>}
+            </div>
+          </div>
+        </>
+      )}
       <div className="flex gap-2 pt-1">
-        {getKey() && <Btn variant="danger" onClick={() => { try { localStorage.removeItem("pp_api_key"); } catch (_) {} setKey(""); notify("Key removed"); }}>Remove key</Btn>}
-        <Btn className="flex-1" onClick={save}><Check size={16} /> Save settings</Btn>
+        <Btn variant="outline" className="flex-1" onClick={onClose}>Close</Btn>
+        {!AI_PROXY_URL && <Btn className="flex-1" onClick={save}><Check size={16} /> Save settings</Btn>}
       </div>
-      <p className="text-xs text-stone-400 text-center pt-1">Everything else — inventory, trips, meal planning — works fully offline without a key.</p>
     </>
   );
 }
@@ -1303,6 +1513,8 @@ export default function App() {
   const [pantry, setPantry] = useState([]);
   const [meals, setMeals] = useState([]);
   const [trips, setTrips] = useState([]);
+  const [ideas, setIdeas] = useState([]);          // persisted AI suggestions — survive reloads
+  const [ideasSig, setIdeasSig] = useState("");     // pantry snapshot the ideas were generated from
   const [loaded, setLoaded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1334,12 +1546,12 @@ export default function App() {
   // ── load this user's private data on sign-in ──
   useEffect(() => {
     if (!CONFIGURED) return;
-    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); return; }
+    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); return; }
     let alive = true;
     setLoaded(false);
     loadUserData(user.uid).then((d) => {
       if (!alive) return;
-      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips);
+      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips); setIdeas(d.ideas); setIdeasSig(d.ideasSig);
       setLoaded(true);
     });
     return () => { alive = false; };
@@ -1349,9 +1561,9 @@ export default function App() {
   useEffect(() => {
     if (!loaded || !user) return;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips }), 600);
+    saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips, ideas, ideasSig }), 600);
     return () => clearTimeout(saveTimer.current);
-  }, [pantry, meals, trips, loaded, user]);
+  }, [pantry, meals, trips, ideas, ideasSig, loaded, user]);
 
   // fonts
   useEffect(() => {
@@ -1386,6 +1598,7 @@ export default function App() {
   }));
   const removeItem = (id) => setPantry((p) => p.filter((i) => i.id !== id));
   const clearPantry = () => setPantry([]);
+  const replacePantry = (arr) => setPantry(arr); // used to undo an auto-committed scan
 
   // merge-by-name so scans + receipts + manual all feed ONE inventory
   const addOrMerge = (items) => {
@@ -1409,14 +1622,15 @@ export default function App() {
   const toggleFav = (id) => setMeals((s) => s.map((m) => m.id === id ? { ...m, favorite: !m.favorite } : m));
   const setMealSteps = (id, steps) => setMeals((s) => s.map((m) => m.id === id ? { ...m, steps } : m));
   const scheduleMeal = (id, date) => setMeals((s) => s.map((m) => m.id === id ? { ...m, scheduledDate: date } : m));
+  const setMealServings = (id, delta) => setMeals((s) => s.map((m) => m.id === id ? { ...m, servings: Math.max(1, (Number(m.servings) || 2) + delta) } : m));
 
   const addTrip = (t) => setTrips((s) => [{ id: uid(), ...t }, ...s]);
   const removeTrip = (id) => setTrips((s) => s.filter((t) => t.id !== id));
 
   const ctx = {
-    pantry, meals, trips, notify,
-    addItem, updateItem, adjustQty, removeItem, clearPantry, addOrMerge,
-    addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, addTrip, removeTrip,
+    pantry, meals, trips, ideas, setIdeas, ideasSig, setIdeasSig, notify,
+    addItem, updateItem, adjustQty, removeItem, clearPantry, replacePantry, addOrMerge,
+    addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, setMealServings, addTrip, removeTrip,
   };
 
   const expiringCount = pantry.filter((i) => i.expiry && daysUntil(i.expiry) <= 3).length;
