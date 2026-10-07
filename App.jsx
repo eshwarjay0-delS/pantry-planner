@@ -13,7 +13,7 @@ import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import {
   SLOTS, SLOT_META, addDaysISO, daysBetween, isoOf, FOODS, fmtAmount, ALL_LIBRARY, macrosOf, withMacros,
   recipeNeeds, indexPantry, deductFromPantry, computeTargets, slotTargets, rankRecipes, planWeek,
-  shoppingNeeds, fmtBuy,
+  shoppingNeeds, fmtBuy, buildMatrix, cookable, unlocks,
 } from "./engine.js";
 
 /* ─────────────────────────────  constants  ───────────────────────────── */
@@ -1605,7 +1605,7 @@ const DEFAULT_FIT = {
   dishMemory: {},  // { dishKey: { scale, n } } — remembers how you correct portion estimates
   weights: [],     // [{ date, kg }]
   userRecipes: [], // AI-made recipes built only from known ingredients
-  prefs: { snack: true },
+  prefs: { snack: true, extraHave: [] }, // extraHave: staples ticked in Cook now that aren't tracked in the pantry
 };
 
 function normalizeFit(raw) {
@@ -2394,10 +2394,158 @@ function PlanShopping() {
 
 /* ─────────────────────────────  Meals tab wrapper (ideas + scheduled)  ─────────────────────────────── */
 
+/* ─────────────────────────────  Cook now (offline ingredient → recipe matrix)  ─────────────────────────────── */
+
+function CookNow() {
+  const { today, pantry, recipes, fit, cookMeal, lockMeal, setExtraHave, notify } = useApp();
+  const matrix = React.useMemo(() => buildMatrix(recipes), [recipes]);
+  const pindex = React.useMemo(() => indexPantry(pantry, today), [pantry, today]);
+  const [off, setOff] = useState(() => new Set());   // pantry items unticked just for this look
+  const [edit, setEdit] = useState(false);
+  const [slot, setSlot] = useState("all");
+  const [openId, setOpenId] = useState(null);
+  const [all, setAll] = useState(false);            // also list dishes missing 3 or more things
+
+  const extra = new Set(fit.prefs.extraHave || []);
+  const inPantry = (k) => !!(pindex[k] && pindex[k].grams > 0);
+  const has = (k) => (inPantry(k) && !off.has(k)) || extra.has(k);
+  const toggle = (k) => {
+    if (inPantry(k)) setOff((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
+    else setExtraHave(extra.has(k) ? [...extra].filter((x) => x !== k) : [...extra, k]);
+  };
+  const foods = Object.values(FOODS);
+  const cats = [...new Set(foods.map((f) => f.cat))];
+  const have = foods.filter((f) => has(f.key)).map((f) => f.key);
+  const opt = slot === "all" ? {} : { slot };
+  const rows = cookable(matrix, have, opt).map((x) => ({
+    ...x,
+    // ticked from the pantry, but less there than one serving needs
+    low: x.recipe.ing.filter((i) => inPantry(i.k) && !off.has(i.k) && pindex[i.k].grams + 2 < i.g).map((i) => i.k),
+  }));
+  const ready = rows.filter((x) => !x.missing.length);
+  const tips = unlocks(matrix, have, opt).slice(0, 3);
+  const near = rows.filter((x) => x.missing.length <= 2);
+  const shown = all ? rows : near;
+  const slotFor = (r) => { const g = guessSlot(); return r.slots.includes(g) ? g : r.slots[0]; };
+  const names = (keys) => keys.map((k) => FOODS[k].name.replace(/ \(.*\)/, "")).join(", ");
+
+  const plan = (r) => {
+    const s = slotFor(r);
+    const done = (fit.logs[today] || []).some((e) => e.slot === s);
+    const date = done ? addDaysISO(today, 1) : today;
+    lockMeal(date, s, r.id, 1);
+    notify(`Planned for ${done ? "tomorrow's" : "today's"} ${SLOT_META[s].label.toLowerCase()}`);
+  };
+
+  return (
+    <div className="px-4 pt-3 pb-4 space-y-3">
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>What can I cook right now?</p>
+            <p className="text-xs text-stone-500 mt-0.5">{have.length} ingredients ticked — your pantry is ticked for you.</p>
+          </div>
+          <Btn size="sm" variant={edit ? "solid" : "outline"} onClick={() => setEdit(!edit)}>{edit ? "Done" : "Edit"}</Btn>
+        </div>
+        {edit && (
+          <div className="mt-3 space-y-3">
+            {cats.map((c) => (
+              <div key={c}>
+                <p className="text-[11px] font-bold uppercase tracking-wide text-stone-400">{CAT_EMOJI[c] || "📦"} {c}</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {foods.filter((f) => f.cat === c).map((f) => (
+                    <button key={f.key} onClick={() => toggle(f.key)} aria-pressed={has(f.key)}
+                      className={`px-2.5 h-8 rounded-full text-[13px] font-semibold flex items-center gap-1 transition ${has(f.key) ? "bg-emerald-700 text-white" : "bg-stone-100 text-stone-500"}`}>
+                      {has(f.key) && <Check size={13} />}{f.name.replace(/ \(.*\)/, "")}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <p className="text-[11px] text-stone-400">Ticks you add for things not in your pantry (oil, ghee, flour…) are remembered. Salt, spices, ginger, garlic and chilies are always assumed.</p>
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {[["all", "All"], ...SLOTS.map((s) => [s, SLOT_META[s].label])].map(([id, l]) => (
+          <button key={id} onClick={() => setSlot(id)} className={`shrink-0 px-3 h-8 rounded-full text-[13px] font-bold ${slot === id ? "bg-emerald-700 text-white" : "bg-white ring-1 ring-stone-200 text-stone-600"}`}>{l}</button>
+        ))}
+      </div>
+
+      <p className="text-sm font-bold text-stone-700">
+        {ready.length ? `${ready.length} dish${ready.length > 1 ? "es" : ""} you can make now` : "Nothing is fully covered yet"}
+        <span className="font-medium text-stone-400"> · {near.length - ready.length} need 1 or 2 things</span>
+      </p>
+
+      {tips.length > 0 && (
+        <div className="rounded-2xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2 text-sm text-amber-900">
+          <span className="font-bold">One item away:</span>{" "}
+          {tips.map((t, i) => <span key={t.key}>{i > 0 && " · "}{t.name.replace(/ \(.*\)/, "")} → {t.n} more</span>)}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {shown.map(({ recipe: r, missing, low }) => {
+          const open = openId === r.id;
+          return (
+            <div key={r.id} className="rounded-2xl bg-white ring-1 ring-stone-200 overflow-hidden">
+              <button onClick={() => setOpenId(open ? null : r.id)} className="w-full text-left p-3 flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>{r.name}</p>
+                  <p className="text-xs text-stone-400 tabular-nums">{r.m.kcal} kcal · {Math.round(r.m.p)} g protein · {r.slots.map((s) => SLOT_META[s].label.toLowerCase()).join(" / ")}</p>
+                  {missing.length > 0
+                    ? <p className="text-xs font-semibold text-amber-700 mt-0.5">Missing {missing.length}: {names(missing)}</p>
+                    : low.length > 0 && <p className="text-xs font-semibold text-amber-700 mt-0.5">Running low on {names(low)}</p>}
+                </div>
+                <span className={`shrink-0 text-[11px] font-bold rounded-full px-2 py-0.5 ${missing.length ? "bg-stone-100 text-stone-500" : "bg-emerald-50 text-emerald-700"}`}>
+                  {missing.length ? `${r.ing.length - missing.length}/${r.ing.length}` : "Ready"}
+                </span>
+              </button>
+              {open && (
+                <div className="px-3 pb-3 space-y-2">
+                  <p className="text-sm text-stone-500">{r.desc}</p>
+                  <div className="rounded-xl bg-stone-50 divide-y divide-stone-100">
+                    {r.ing.map((i) => (
+                      <div key={i.k} className="flex items-center justify-between px-3 py-1.5 text-sm">
+                        <span className="text-stone-700">{FOODS[i.k].name}</span>
+                        <span className="flex items-center gap-2 tabular-nums">
+                          <span className="font-semibold text-stone-800">{fmtAmount(i.k, i.g)}</span>
+                          {missing.includes(i.k) ? <span className="text-[11px] font-bold text-rose-600">missing</span>
+                            : low.includes(i.k) ? <span className="text-[11px] font-bold text-amber-600">low</span>
+                            : <Check size={14} className="text-emerald-600" />}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <ol className="space-y-1.5 text-sm text-stone-600 list-decimal pl-5">{r.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <Btn onClick={() => { cookMeal({ slot: slotFor(r), rid: r.id, cook: 1, eat: 1 }); setOpenId(null); }}><Check size={16} /> Cooked it</Btn>
+                    <Btn variant="outline" onClick={() => plan(r)}><Pin size={16} /> Plan it</Btn>
+                  </div>
+                  <p className="text-[11px] text-stone-400">Amounts are for one serving. Planning it puts anything you're short of on the shopping list.</p>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {rows.length > near.length && (
+        <Btn variant="soft" className="w-full" onClick={() => setAll(!all)}>{all ? "Show fewer" : `Show the other ${rows.length - near.length} dishes`}</Btn>
+      )}
+
+      <a href="https://myfridgefood.com" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-1.5 text-sm font-semibold text-emerald-700 py-2">
+        <ExternalLink size={14} /> Want more ideas? Open MyFridgeFood
+      </a>
+    </div>
+  );
+}
+
 function Seg({ value, onChange, options }) {
   return (
     <div className="px-4 pt-2">
-      <div className="grid grid-cols-2 rounded-xl bg-stone-200/70 p-1 text-sm font-bold">
+      <div className="grid rounded-xl bg-stone-200/70 p-1 text-sm font-bold" style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}>
         {options.map(([id, l]) => (
           <button key={id} onClick={() => onChange(id)} className={`h-9 rounded-lg transition ${value === id ? "bg-white shadow text-emerald-700" : "text-stone-500"}`}>{l}</button>
         ))}
@@ -2416,13 +2564,13 @@ const TABS = [
 const VIEWS = {
   today: [["today", "Today"], ["insights", "Insights"]],
   inventory: [["items", "In stock"], ["scan", "Scan & add"]],
-  meals: [["ideas", "Ideas"], ["scheduled", "Scheduled"]],
+  meals: [["cook", "Cook now"], ["ideas", "Ideas"], ["scheduled", "Scheduled"]],
   shopping: [["list", "Shopping list"], ["trips", "Trips & receipts"]],
 };
 
 export default function App() {
   const [tab, setTabRaw] = useState("today");
-  const [views, setViews] = useState({ today: "today", inventory: "items", meals: "ideas", shopping: "list" });
+  const [views, setViews] = useState({ today: "today", inventory: "items", meals: "cook", shopping: "list" });
   const setView = (t, v) => setViews((s) => ({ ...s, [t]: v }));
   const setTab = (t, v) => { setTabRaw(t); if (v) setView(t, v); };
   const today = useToday();
@@ -2685,6 +2833,7 @@ export default function App() {
   const addWeight = (kg) => patchFit((f) => ({ ...f, weights: [...(f.weights || []).filter((w) => w.date !== today), { date: today, kg }] }));
   const saveTargets = (t) => { patchFit((f) => ({ ...f, targets: { ...f.targets, ...t } })); notify("Targets saved"); };
   const setSnack = (on) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, snack: on } }));
+  const setExtraHave = (keys) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, extraHave: keys } }));
   const rememberDishes = (items) => patchFit((f) => {
     const mem = { ...f.dishMemory };
     for (const it of items) {
@@ -2707,7 +2856,7 @@ export default function App() {
 
   const ctx = {
     today, fit, recipes, byId, setTab, withUndo, logEntries, removeEntry, cookMeal, skipMeal, eatLeftover,
-    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack,
+    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack, setExtraHave,
     rememberDishes, addAiRecipes, openLog, openSettings,
     pantry, meals, trips, ideas, setIdeas, ideasSig, setIdeasSig, notify,
     addItem, updateItem, adjustQty, removeItem, clearPantry, replacePantry, addOrMerge,
@@ -2760,7 +2909,7 @@ export default function App() {
           <Seg value={views[tab]} onChange={(v) => setView(tab, v)} options={VIEWS[tab]} />
           {tab === "today" && (views.today === "today" ? <TodayTab openLog={openLog} openTargets={() => setTargetsOpen(true)} /> : <InsightsTab />)}
           {tab === "inventory" && (views.inventory === "items" ? <InventoryTab /> : <ScanTab openSettings={() => setShowSettings(true)} />)}
-          {tab === "meals" && (views.meals === "ideas" ? <MealIdeas /> : <PlannerTab />)}
+          {tab === "meals" && (views.meals === "cook" ? <CookNow /> : views.meals === "ideas" ? <MealIdeas /> : <PlannerTab />)}
           {tab === "shopping" && (views.shopping === "list" ? <div className="px-4 pt-3 pb-4"><PlanShopping /></div> : <ShoppingTab />)}
           <div className="h-24" />
         </main>

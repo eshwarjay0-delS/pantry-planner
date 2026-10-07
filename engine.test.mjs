@@ -204,3 +204,67 @@ test("dates use the local calendar day, not UTC", () => {
   assert.equal(addDaysISO("2026-10-31", 1), "2026-11-01");
   assert.equal(addDaysISO("2026-03-08", 1), "2026-03-09"); // across a DST change
 });
+
+/* ───── offline cook-now matrix ───── */
+import { FOOD_KEYS, buildMatrix, cookable, unlocks } from "./engine.js";
+
+const MX = buildMatrix(ALL_LIBRARY);
+// independent reference: straight from each recipe's ingredient list
+const refMissing = (r, have) => [...new Set(r.ing.map((i) => i.k))].filter((k) => !have.has(k)).sort();
+const checkCombo = (keys) => {
+  const have = new Set(keys);
+  const res = cookable(MX, have);
+  assert.equal(res.length, ALL_LIBRARY.length);
+  let prev = -1;
+  for (const { recipe, missing } of res) {
+    assert.deepEqual([...missing].sort(), refMissing(recipe, have), `${recipe.id} with [${keys}]`);
+    assert.ok(missing.length >= prev, "sorted by fewest missing");
+    prev = missing.length;
+  }
+};
+
+test("matrix: one row per recipe, one column per ingredient, every ingredient used", () => {
+  assert.equal(MX.cells.length, ALL_LIBRARY.length);
+  assert.ok(MX.cells.every((row) => row.length === FOOD_KEYS.length));
+  for (const k of FOOD_KEYS) assert.ok(MX.byFood[k].length >= 1, `${k} is in no recipe`);
+});
+
+test("matrix: every single, pair and triple of ingredients matches the reference", () => {
+  const n = FOOD_KEYS.length;
+  let combos = 0;
+  checkCombo([]); combos++;
+  for (let a = 0; a < n; a++) {
+    checkCombo([FOOD_KEYS[a]]); combos++;
+    for (let b = a + 1; b < n; b++) {
+      checkCombo([FOOD_KEYS[a], FOOD_KEYS[b]]); combos++;
+      for (let c = b + 1; c < n; c++) { checkCombo([FOOD_KEYS[a], FOOD_KEYS[b], FOOD_KEYS[c]]); combos++; }
+    }
+  }
+  assert.equal(combos, 1 + n + (n * (n - 1)) / 2 + (n * (n - 1) * (n - 2)) / 6);
+});
+
+test("matrix: 20,000 random larger combinations match the reference", () => {
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let i = 0; i < 20000; i++) {
+    const p = rnd();
+    checkCombo(FOOD_KEYS.filter(() => rnd() < p));
+  }
+});
+
+test("matrix: nothing ticked → nothing ready; everything ticked → everything ready", () => {
+  assert.ok(cookable(MX, []).every((x) => x.missing.length === new Set(x.recipe.ing.map((i) => i.k)).size));
+  assert.ok(cookable(MX, FOOD_KEYS).every((x) => x.missing.length === 0));
+  assert.ok(cookable(MX, FOOD_KEYS, { slot: "snack" }).every((x) => x.recipe.slots.includes("snack")));
+});
+
+test("matrix: unlocks counts recipes that are exactly one ingredient away", () => {
+  const have = ["rice", "onion", "tomato", "oil", "atta", "curd"];
+  const res = cookable(MX, have);
+  for (const u of unlocks(MX, have)) {
+    assert.equal(u.n, res.filter((x) => x.missing.length === 1 && x.missing[0] === u.key).length);
+    const after = cookable(MX, [...have, u.key]).filter((x) => !x.missing.length).length;
+    assert.equal(after - res.filter((x) => !x.missing.length).length, u.n);
+  }
+  assert.ok(unlocks(MX, have).length > 0);
+});
