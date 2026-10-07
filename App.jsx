@@ -5,11 +5,11 @@ import {
   Star, CalendarPlus, CalendarClock, TrendingUp, Receipt, AlertTriangle,
   CircleCheck, Clock, DollarSign, Store, ChevronRight, RotateCcw, Lightbulb,
   Cog, KeyRound, ExternalLink, ClipboardList, LogOut, LogIn, ShieldCheck, BookOpen,
-  ChevronLeft, Pin, Target, Droplet, Home, BarChart3,
+  ChevronLeft, Pin, Target, Droplet, Home,
 } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from "firebase/auth";
-import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import {
   SLOTS, SLOT_META, addDaysISO, daysBetween, isoOf, FOODS, fmtAmount, ALL_LIBRARY, macrosOf, withMacros,
   recipeNeeds, indexPantry, deductFromPantry, computeTargets, slotTargets, rankRecipes, planWeek,
@@ -56,22 +56,23 @@ if (CONFIGURED) {
 
 // Per-user private cloud storage. Each person's data lives at users/{uid},
 // readable/writable only by that signed-in user (enforced by Firestore rules).
-async function loadUserData(uid) {
-  try {
-    const snap = await getDoc(doc(db, "users", uid));
-    const d = snap.exists() ? snap.data() : {};
-    return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [], ideas: d.ideas || [], ideasSig: d.ideasSig || "", fit: normalizeFit(d.fit) };
-  } catch (e) {
-    return { pantry: [], meals: [], trips: [], ideas: [], ideasSig: "", fit: normalizeFit(null), error: e.message };
-  }
+function parseUserDoc(d) {
+  d = d || {};
+  return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [], ideas: d.ideas || [], ideasSig: d.ideasSig || "", fit: normalizeFit(d.fit) };
 }
+// Exactly what gets written to the cloud, and what a cloud snapshot is compared against.
+const payloadOf = (s, today) => ({ pantry: s.pantry, meals: s.meals, trips: s.trips, ideas: s.ideas, ideasSig: s.ideasSig, fit: pruneFit(s.fit, today) });
+// Key-order-independent JSON, so "same data" compares equal whichever device wrote it.
+const stableJSON = (v) => JSON.stringify(v, (_k, val) => (val && typeof val === "object" && !Array.isArray(val)
+  ? Object.fromEntries(Object.keys(val).sort().map((k) => [k, val[k]])) : val));
 async function saveUserData(uid, data) {
   try {
     // JSON round-trip strips `undefined`, which Firestore rejects (and we'd never see the error).
     // mergeFields replaces each listed field wholesale, so deleted plan/log keys really disappear.
     const clean = JSON.parse(JSON.stringify(data));
     await setDoc(doc(db, "users", uid), clean, { mergeFields: Object.keys(clean) });
-  } catch (e) { console.warn("Save failed", e); }
+    return true;
+  } catch (e) { console.warn("Save failed", e); return false; }
 }
 
 // Instant local cache for meal ideas, written synchronously the moment they're
@@ -685,7 +686,7 @@ function InventoryTab() {
 
       {rows.length === 0 ? (
         <Empty icon={Package} title={pantry.length ? "Nothing matches" : "Your inventory is empty"}
-          sub={pantry.length ? "Try a different search or category." : "Add items by hand, or snap a receipt or your groceries on the Scan tab."}
+          sub={pantry.length ? "Try a different search or category." : "Add items by hand, or snap a receipt or your groceries under Scan & add."}
           action={!pantry.length && <Btn onClick={() => setForm({})}><Plus size={16} /> Add first item</Btn>} />
       ) : (
         <>
@@ -1221,7 +1222,7 @@ function PlannerTab() {
     return fmtLong(iso);
   };
 
-  if (!meals.length) return <div className="pt-2"><Empty icon={CalendarDays} title="No meals planned yet" sub="Save meals on the Meals tab, then schedule them here." /></div>;
+  if (!meals.length) return <div className="pt-2"><Empty icon={CalendarDays} title="No meals planned yet" sub="Save meals under Ideas, then schedule them here." /></div>;
 
   return (
     <div className="px-4 pt-2 pb-4 space-y-5">
@@ -1353,7 +1354,6 @@ function ShoppingTab() {
   return (
     <div className="px-4 pt-2 pb-4">
       {node}
-      <PlanShopping />
       {/* stats */}
       <div className="grid grid-cols-3 gap-2">
         {[["Total spent", money(total)], ["Trips", String(trips.length)], ["Avg / trip", money(avg)]].map(([l, v]) => (
@@ -1846,7 +1846,7 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
           </div>
         ))}
       </div>
-      {missing.length > 0 && <p className="mt-1.5 text-xs text-rose-600">Short on {missing.length} item{missing.length > 1 ? "s" : ""}. Plan this meal and they go on your Shop list.</p>}
+      {missing.length > 0 && <p className="mt-1.5 text-xs text-rose-600">Short on {missing.length} item{missing.length > 1 ? "s" : ""}. Plan this meal and they go on your shopping list.</p>}
 
       <button onClick={() => setSteps(!steps)} className="mt-2 text-sm font-semibold text-emerald-700 flex items-center gap-1"><BookOpen size={14} /> {steps ? "Hide steps" : "How to cook"}</button>
       {steps && <ol className="mt-1 space-y-1.5 text-sm text-stone-600 list-decimal pl-5">{r.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>}
@@ -2018,7 +2018,7 @@ function TodayTab({ openLog, openTargets }) {
         </div>
       )}
 
-      <Btn variant="soft" className="w-full" onClick={() => { planNextWeek(); setTab("shopping"); }}><CalendarDays size={16} /> Plan my week &amp; build the shopping list</Btn>
+      <Btn variant="soft" className="w-full" onClick={() => { planNextWeek(); setTab("shopping", "list"); }}><CalendarDays size={16} /> Plan my week &amp; build the shopping list</Btn>
       <p className="text-center text-[11px] text-stone-400">Salt, spices, ginger, garlic, chilies and herbs are assumed to always be in stock.</p>
     </div>
   );
@@ -2271,8 +2271,8 @@ function InsightsTab() {
       <h1 className="text-2xl font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>Insights</h1>
 
       {logged.length === 0 ? (
-        <Empty icon={TrendingUp} title="No meals logged this week" sub="Log a meal on the Today tab and your weekly numbers will show up here."
-          action={<Btn onClick={() => setTab("today")}><Camera size={16} /> Go to Today</Btn>} />
+        <Empty icon={TrendingUp} title="No meals logged this week" sub="Log a meal under Today and your weekly numbers will show up here."
+          action={<Btn onClick={() => setTab("today", "today")}><Camera size={16} /> Go to Today</Btn>} />
       ) : (
         <>
           <div className="grid grid-cols-3 gap-2">
@@ -2394,34 +2394,37 @@ function PlanShopping() {
 
 /* ─────────────────────────────  Meals tab wrapper (ideas + scheduled)  ─────────────────────────────── */
 
-function MealsTab() {
-  const [view, setView] = useState("ideas");
+function Seg({ value, onChange, options }) {
   return (
-    <div>
-      <div className="px-4 pt-2">
-        <div className="grid grid-cols-2 rounded-xl bg-stone-200/70 p-1 text-sm font-bold">
-          {[["ideas", "Ideas"], ["scheduled", "Scheduled"]].map(([id, l]) => (
-            <button key={id} onClick={() => setView(id)} className={`h-9 rounded-lg transition ${view === id ? "bg-white shadow text-emerald-700" : "text-stone-500"}`}>{l}</button>
-          ))}
-        </div>
+    <div className="px-4 pt-2">
+      <div className="grid grid-cols-2 rounded-xl bg-stone-200/70 p-1 text-sm font-bold">
+        {options.map(([id, l]) => (
+          <button key={id} onClick={() => onChange(id)} className={`h-9 rounded-lg transition ${value === id ? "bg-white shadow text-emerald-700" : "text-stone-500"}`}>{l}</button>
+        ))}
       </div>
-      {view === "ideas" ? <MealIdeas /> : <PlannerTab />}
     </div>
   );
 }
 
-
 const TABS = [
   { id: "today", label: "Today", icon: Home },
   { id: "inventory", label: "Pantry", icon: Package },
-  { id: "scan", label: "Scan", icon: Camera },
   { id: "meals", label: "Meals", icon: Utensils },
   { id: "shopping", label: "Shop", icon: ShoppingCart },
-  { id: "insights", label: "Insights", icon: BarChart3 },
 ];
+// Each tab has two views behind one switch.
+const VIEWS = {
+  today: [["today", "Today"], ["insights", "Insights"]],
+  inventory: [["items", "In stock"], ["scan", "Scan & add"]],
+  meals: [["ideas", "Ideas"], ["scheduled", "Scheduled"]],
+  shopping: [["list", "Shopping list"], ["trips", "Trips & receipts"]],
+};
 
 export default function App() {
-  const [tab, setTab] = useState("today");
+  const [tab, setTabRaw] = useState("today");
+  const [views, setViews] = useState({ today: "today", inventory: "items", meals: "ideas", shopping: "list" });
+  const setView = (t, v) => setViews((s) => ({ ...s, [t]: v }));
+  const setTab = (t, v) => { setTabRaw(t); if (v) setView(t, v); };
   const today = useToday();
   const [fit, setFit] = useState(() => normalizeFit(null));
   const [logSheet, setLogSheet] = useState(null);   // { slot } while the log sheet is open
@@ -2461,35 +2464,62 @@ export default function App() {
   };
   const doSignOut = async () => { try { if (user) clearIdeasCache(user.uid); await signOut(auth); } catch (_) {} };
 
-  // ── load this user's private data on sign-in ──
+  // ── live sync: this user's private doc streams in, so every open device stays current ──
+  const syncedRef = useRef("");     // stable JSON of what the cloud is known to hold
+  const dirtyRef = useRef(false);   // local edits waiting to be written
+  const pendingRef = useRef(null);  // { json, payload } for an immediate flush when the tab is hidden
+  const [loadErr, setLoadErr] = useState("");
+  const [loadKey, setLoadKey] = useState(0);
   useEffect(() => {
     if (!CONFIGURED) return;
-    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); setFit(normalizeFit(null)); return; }
-    let alive = true;
-    setLoaded(false);
+    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); setFit(normalizeFit(null)); syncedRef.current = ""; return; }
+    setLoaded(false); setLoadErr(""); syncedRef.current = ""; dirtyRef.current = false; pendingRef.current = null;
     // Instant hydrate from the local cache first — no network wait, so meal
     // ideas reappear immediately even if the last Firestore write never landed
     // (e.g. the tab got discarded mid-save). Firestore then confirms/updates.
     const cached = readIdeasCache(user.uid);
     if (cached && cached.ideas && cached.ideas.length) { setIdeas(cached.ideas); setIdeasSig(cached.sig || ""); }
-    loadUserData(user.uid).then((d) => {
-      if (!alive) return;
+    let first = true;
+    const unsub = onSnapshot(doc(db, "users", user.uid), { includeMetadataChanges: true }, (snap) => {
+      if (snap.metadata.hasPendingWrites) return;            // our own write, not confirmed yet
+      const d = parseUserDoc(snap.exists() ? snap.data() : {});
+      const json = stableJSON(payloadOf(d, todayISO()));
+      if (!first && (dirtyRef.current || json === syncedRef.current)) return; // unsaved local edits win; echoes are ignored
+      syncedRef.current = json;
       setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips); setFit(d.fit);
-      // Only Firestore overrides the local cache if it actually has ideas —
-      // otherwise a not-yet-synced write shouldn't erase what we just restored.
-      if (d.ideas && d.ideas.length) { setIdeas(d.ideas); setIdeasSig(d.ideasSig); }
+      // On first load only, an empty cloud list must not erase ideas restored from the local cache.
+      if (!first || (d.ideas && d.ideas.length)) { setIdeas(d.ideas); setIdeasSig(d.ideasSig); }
+      first = false;
       setLoaded(true);
-    });
-    return () => { alive = false; };
-  }, [user]);
+    }, (e) => { if (first) setLoadErr((e && e.message) || "Couldn't reach your data."); });
+    return unsub;
+  }, [user, loadKey]);
 
-  // ── save (debounced) to this user's private doc ──
+  // ── save (debounced) to this user's private doc — only when something differs from the cloud ──
+  const flushSave = useCallback(async () => {
+    const p = pendingRef.current;
+    if (!p || !user) return;
+    pendingRef.current = null; clearTimeout(saveTimer.current);
+    syncedRef.current = p.json; dirtyRef.current = false;
+    const ok = await saveUserData(user.uid, p.payload);
+    if (!ok && syncedRef.current === p.json) syncedRef.current = "";  // try again on the next change
+  }, [user]);
   useEffect(() => {
     if (!loaded || !user) return;
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips, ideas, ideasSig, fit: pruneFit(fit, today) }), 600);
+    const payload = payloadOf({ pantry, meals, trips, ideas, ideasSig, fit }, today);
+    const json = stableJSON(payload);
+    if (json === syncedRef.current) { dirtyRef.current = false; pendingRef.current = null; return; }
+    dirtyRef.current = true;
+    pendingRef.current = { json, payload };
+    saveTimer.current = setTimeout(flushSave, 600);
     return () => clearTimeout(saveTimer.current);
-  }, [pantry, meals, trips, ideas, ideasSig, fit, loaded, user]);
+  }, [pantry, meals, trips, ideas, ideasSig, fit, today, loaded, user, flushSave]);
+  // Phones can freeze a tab the moment you switch apps — write straight away instead of waiting.
+  useEffect(() => {
+    const h = () => { if (document.visibilityState === "hidden") flushSave(); };
+    document.addEventListener("visibilitychange", h); window.addEventListener("pagehide", flushSave);
+    return () => { document.removeEventListener("visibilitychange", h); window.removeEventListener("pagehide", flushSave); };
+  }, [flushSave]);
 
   // Mirror ideas to the instant local cache the moment they change — this write
   // is synchronous (no network), so it survives even if the tab gets killed
@@ -2691,6 +2721,15 @@ export default function App() {
   if (!CONFIGURED) return <ConfigNeeded />;
   if (!authReady) return <div className="min-h-screen grid place-items-center bg-stone-50 text-emerald-700"><Loader2 className="animate-spin" /></div>;
   if (!user) return <SignIn onSignIn={signIn} err={authErr} />;
+  if (!loaded && loadErr) return (
+    <div className="min-h-screen grid place-items-center bg-stone-50 px-6 text-center">
+      <div>
+        <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>Couldn't load your kitchen</p>
+        <p className="text-sm text-stone-500 mt-1">Check your connection and try again. Nothing has been changed.</p>
+        <Btn className="mt-4" onClick={() => setLoadKey((k) => k + 1)}><RotateCcw size={16} /> Retry</Btn>
+      </div>
+    </div>
+  );
   if (!loaded) return <div className="min-h-screen grid place-items-center bg-stone-50 text-emerald-700"><Loader2 className="animate-spin" /></div>;
 
   return (
@@ -2718,12 +2757,11 @@ export default function App() {
 
         {/* content */}
         <main className="max-w-md mx-auto">
-          {tab === "today" && <TodayTab openLog={openLog} openTargets={() => setTargetsOpen(true)} />}
-          {tab === "inventory" && <InventoryTab />}
-          {tab === "scan" && <ScanTab openSettings={() => setShowSettings(true)} />}
-          {tab === "meals" && <MealsTab />}
-          {tab === "shopping" && <ShoppingTab />}
-          {tab === "insights" && <InsightsTab />}
+          <Seg value={views[tab]} onChange={(v) => setView(tab, v)} options={VIEWS[tab]} />
+          {tab === "today" && (views.today === "today" ? <TodayTab openLog={openLog} openTargets={() => setTargetsOpen(true)} /> : <InsightsTab />)}
+          {tab === "inventory" && (views.inventory === "items" ? <InventoryTab /> : <ScanTab openSettings={() => setShowSettings(true)} />)}
+          {tab === "meals" && (views.meals === "ideas" ? <MealIdeas /> : <PlannerTab />)}
+          {tab === "shopping" && (views.shopping === "list" ? <div className="px-4 pt-3 pb-4"><PlanShopping /></div> : <ShoppingTab />)}
           <div className="h-24" />
         </main>
 
@@ -2751,7 +2789,7 @@ export default function App() {
 
         {/* bottom nav */}
         <nav className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-t border-stone-200">
-          <div className="max-w-md mx-auto grid grid-cols-6">
+          <div className="max-w-md mx-auto grid grid-cols-4">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setTab(id)}
                 className={`relative py-2.5 flex flex-col items-center gap-0.5 transition ${tab === id ? "text-emerald-700" : "text-stone-400"}`}>
