@@ -268,3 +268,102 @@ test("matrix: unlocks counts recipes that are exactly one ingredient away", () =
   }
   assert.ok(unlocks(MX, have).length > 0);
 });
+
+/* ───── whole pieces, distinct slot lists, trainer ───── */
+import { scaledIng, suggestDay, coach, streakOf, dayHit, targetsFor, weekGrade, SLOTS } from "./engine.js";
+
+test("eggs, slices and fruit scale to whole pieces everywhere", () => {
+  const r = byId["egg-bhurji-roti"]; // 150 g egg = 3 eggs per serving
+  assert.equal(scaledIng(r.ing, 1.5).find((i) => i.k === "egg").g, 250); // 4.5 → 5 eggs
+  assert.equal(recipeNeeds(r, 1.5).egg, 250);
+  assert.equal(fmtAmount("egg", recipeNeeds(r, 1.5).egg), "5 eggs");
+  assert.equal(recipeNeeds(r, 1.5).onion, 75); // weighable things stay exact
+  assert.equal(macrosOf(r.ing, 1).kcal, r.m.kcal);
+});
+
+test("suggestDay: no dish appears under two slots, and every dish is offered somewhere", () => {
+  const slots = ["breakfast", "lunch", "dinner", "snack"];
+  const targets = { breakfast: { kcal: 700, protein: 35 }, lunch: { kcal: 950, protein: 50 }, dinner: { kcal: 800, protein: 45 }, snack: { kcal: 300, protein: 15 } };
+  const out = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07" });
+  const seen = new Map();
+  for (const s of slots) {
+    assert.ok(out[s].length >= 8, `${s} has ${out[s].length}`);
+    for (const o of out[s]) {
+      assert.ok(o.recipe.slots.includes(s), `${o.recipe.id} is not a ${s}`);
+      assert.ok(!seen.has(o.recipe.id), `${o.recipe.id} is in ${seen.get(o.recipe.id)} and ${s}`);
+      seen.set(o.recipe.id, s);
+    }
+  }
+  assert.equal(seen.size, ALL_LIBRARY.length);
+  // a pinned dish leads its slot and is removed from the others
+  const pin = byId["egg-curry-rice"];
+  const p = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07", pinned: { dinner: { recipe: pin, servings: 2 } } });
+  assert.equal(p.dinner[0].recipe.id, pin.id);
+  assert.ok(!p.lunch.some((o) => o.recipe.id === pin.id));
+});
+
+const T = { kcal: 2800, protein: 150, fat: 85, carbs: 360, water: 2600 };
+const E = (slot, kcal, p, source = "cooked") => ({ id: slot + kcal, slot, kcal, p, c: 0, f: 0, name: slot, source });
+const base = { today: "2026-10-07", targets: T, slots: SLOTS, profile: { goal: "gain", pace: 0.5 }, weights: [{ date: "2026-10-06", kg: 75 }] };
+
+test("trainer: overdue meals lead, with the gap and a way to act", () => {
+  const c = coach({ ...base, hour: 14.5, logs: { "2026-10-07": [E("breakfast", 700, 35)] }, water: { "2026-10-07": 1500 } });
+  assert.deepEqual(c.overdue, ["lunch"]);
+  assert.equal(c.messages[0].id, "overdue");
+  assert.match(c.messages[0].title, /Lunch is overdue/);
+  assert.match(c.messages[0].body, /2:30 pm/);
+  assert.equal(c.messages[0].action.slot, "lunch");
+  assert.ok(c.behind && c.problems >= 1);
+});
+
+test("trainer: on pace says what's next; nothing nags when the day is hit", () => {
+  const on = coach({ ...base, hour: 11, logs: { "2026-10-07": [E("breakfast", 750, 40)] }, water: { "2026-10-07": 900 } });
+  assert.equal(on.problems, 0);
+  assert.ok(on.messages.some((m) => m.id === "next" && /Lunch by 2:00 pm/.test(m.body)));
+  const done = coach({ ...base, hour: 21.5, water: { "2026-10-07": 2600 },
+    logs: { "2026-10-07": [E("breakfast", 700, 40), E("lunch", 1000, 50), E("dinner", 850, 45), E("snack", 280, 20)] } });
+  assert.deepEqual(done.messages.map((m) => m.id), ["done"]);
+  assert.equal(done.streak, 1);
+});
+
+test("trainer: water, skipped meals, short days and yesterday's verdict", () => {
+  const c = coach({ ...base, hour: 15, water: {}, logs: {
+    "2026-10-05": [E("lunch", 900, 40)],
+    "2026-10-06": [E("breakfast", 600, 30), E("lunch", 800, 40)],
+    "2026-10-07": [E("breakfast", 700, 20), E("lunch", 0, 0, "skipped")] } });
+  const ids = c.messages.map((m) => m.id);
+  assert.ok(ids.includes("water") && ids.includes("skipped"));
+  assert.ok(!ids.includes("overdue"), "a skipped meal is not overdue");
+  const morning = coach({ ...base, hour: 8, logs: { "2026-10-06": [E("breakfast", 600, 30), E("lunch", 800, 40)] } });
+  assert.match(morning.messages.find((m) => m.id === "yesterday").title, /1,400 of 2,800 kcal\. 1,400 short/);
+  const gone = coach({ ...base, hour: 8, logs: { "2026-10-04": [E("lunch", 900, 40)] } });
+  assert.equal(gone.messages.find((m) => m.id === "yesterday").title, "Nothing logged yesterday.");
+  const fresh = coach({ ...base, hour: 8, logs: {}, weights: [] });
+  assert.ok(!fresh.messages.some((m) => m.id === "yesterday"), "a brand-new user isn't blamed for yesterday");
+  assert.ok(fresh.messages.some((m) => m.id === "weigh"));
+  const short = coach({ ...base, hour: 22, water: { "2026-10-07": 2600 },
+    logs: { "2026-10-07": [E("breakfast", 500, 30), E("lunch", 700, 40), E("dinner", 700, 40), E("snack", 200, 10)] } });
+  assert.equal(short.messages[0].id, "short");
+});
+
+test("trainer: the scale adjusts the plan, with a cool-down", () => {
+  const weights = [{ date: "2026-09-20", kg: 75 }, { date: "2026-10-06", kg: 75.2 }];
+  const slow = coach({ ...base, hour: 9, weights, logs: {} });
+  const m = slow.messages.find((x) => x.id === "trend");
+  assert.equal(m.action.delta, 150);
+  assert.ok(!coach({ ...base, hour: 9, weights, logs: {}, adjustedOn: "2026-10-03" }).messages.some((x) => x.id === "trend"));
+  const fast = coach({ ...base, hour: 9, logs: {}, weights: [{ date: "2026-09-20", kg: 75 }, { date: "2026-10-06", kg: 77.5 }] });
+  assert.equal(fast.messages.find((x) => x.id === "trend").action.delta, -150);
+  const t = targetsFor({ sex: "male", age: 26, heightCm: 170, weightKg: 75, activity: "light", goal: "gain", pace: 0.5 }, 150);
+  assert.equal(t.kcal, 3025);
+  assert.ok(Math.abs(t.protein * 4 + t.carbs * 4 + t.fat * 9 - t.kcal) <= 20);
+});
+
+test("trainer: streaks and the weekly grade", () => {
+  const good = [E("breakfast", 900, 50), E("lunch", 1000, 50), E("dinner", 800, 45)];
+  const logs = { "2026-10-04": good, "2026-10-05": good, "2026-10-06": good, "2026-10-03": [E("lunch", 900, 30)] };
+  assert.ok(dayHit(good, T, "gain"));
+  assert.equal(streakOf(logs, "2026-10-07", T, "gain"), 3);
+  const g = weekGrade(logs, "2026-10-07", T, "gain");
+  assert.equal(g.hit, 3); assert.equal(g.level, "bad");
+});

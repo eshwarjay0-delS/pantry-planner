@@ -131,7 +131,7 @@ const round2 = (x) => Math.round(x * 100) / 100;
 export function fmtAmount(key, g) {
   const f = FOODS[key];
   if (f && f.count && f.pc && f.u) {
-    const n = Math.max(0.5, Math.round((g / f.pc) * 2) / 2);
+    const n = Math.max(1, Math.round(g / f.pc));
     return `${n} ${n === 1 ? f.u[0] : f.u[1]}`;
   }
   const unit = f && f.liquid ? "ml" : "g";
@@ -368,12 +368,20 @@ export const LIBRARY = [
     ["Boil, cube and pan-fry the potato in oil until crisp.", "Top with curd, onion, chaat masala and chili."]),
 ];
 
+// Ingredient amounts for `s` servings. Things you can't split (eggs, bread slices, whole fruit)
+// round to whole pieces, so the card, the macros and the pantry deduction all agree.
+export const scaledIng = (ing, s = 1) => ing.map(({ k, g }) => {
+  const f = FOODS[k];
+  const x = g * s;
+  return { k, g: f && f.count && f.pc ? Math.max(1, Math.round(x / f.pc)) * f.pc : x };
+});
+
 export const macrosOf = (ing, s = 1) => {
   let kcal = 0, p = 0, c = 0, f = 0;
-  for (const { k, g } of ing) {
+  for (const { k, g } of scaledIng(ing, s)) {
     const food = FOODS[k];
     if (!food) continue;
-    const x = (g * s) / 100;
+    const x = g / 100;
     kcal += food.kcal * x; p += food.p * x; c += food.c * x; f += food.f * x;
   }
   return { kcal: Math.round(kcal), p: Math.round(p * 10) / 10, c: Math.round(c * 10) / 10, f: Math.round(f * 10) / 10 };
@@ -385,7 +393,7 @@ export const ALL_LIBRARY = LIBRARY.map(withMacros);
 
 export const recipeNeeds = (recipe, servings) => {
   const out = {};
-  for (const { k, g } of recipe.ing) out[k] = (out[k] || 0) + g * servings;
+  for (const { k, g } of scaledIng(recipe.ing, servings)) out[k] = (out[k] || 0) + g;
   return out;
 };
 
@@ -502,6 +510,13 @@ export function computeTargets(p) {
   return { kcal, protein, fat, carbs, water };
 }
 
+// Computed targets plus the trainer's calorie adjustment (carbs absorb the difference).
+export function targetsFor(profile, adjust = 0) {
+  const t = computeTargets(profile);
+  const kcal = Math.max(1400, t.kcal + (Number(adjust) || 0));
+  return { ...t, kcal, carbs: Math.max(0, Math.round((kcal - t.protein * 4 - t.fat * 9) / 4 / 5) * 5) };
+}
+
 /* ───────────────────────────── ranking ───────────────────────────── */
 
 export const SERVING_STEPS = [0.5, 1, 1.5, 2, 2.5];
@@ -557,6 +572,187 @@ export function rankRecipes({ recipes, slot, target, pindex, dayKey, avoid = new
   }
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, limit);
+}
+
+// One ranked list per open slot, with no dish repeated across slots — breakfast, lunch and dinner
+// never show the same options. Slots take turns picking their best remaining dish.
+// pinned: { slot: { recipe, servings } } goes first in its own slot and nowhere else.
+export function suggestDay({ recipes, slots, targets, pindex, dayKey, avoid = new Set(), recent = new Set(), pinned = {} }) {
+  const ranked = {}, out = {}, ptr = {};
+  const taken = new Set();
+  for (const s of slots) {
+    ranked[s] = rankRecipes({ recipes, slot: s, target: targets[s] || { kcal: 0, protein: 0 }, pindex, dayKey, avoid, recent, limit: Infinity });
+    out[s] = []; ptr[s] = 0;
+    const p = pinned[s];
+    if (p && p.recipe) { out[s].push({ recipe: p.recipe, servings: p.servings, m: macrosOf(p.recipe.ing, p.servings) }); taken.add(p.recipe.id); }
+  }
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const s of slots) {
+      const list = ranked[s];
+      let i = ptr[s];
+      while (i < list.length && taken.has(list[i].recipe.id)) i++;
+      if (i < list.length) { out[s].push(list[i]); taken.add(list[i].recipe.id); i++; progress = true; }
+      ptr[s] = i;
+    }
+  }
+  return out;
+}
+
+/* ───────────────────────────── trainer ───────────────────────────── */
+// Pure rules that turn the day's numbers into blunt, specific instructions.
+
+export const DEADLINE = { breakfast: 10, lunch: 14, snack: 17, dinner: 21 }; // hour each meal should be logged by
+
+export const fmtHour = (h) => {
+  const hh = Math.floor(h), m = Math.floor((h - hh) * 60);
+  return `${hh % 12 || 12}:${pad2(m)} ${hh >= 12 ? "pm" : "am"}`;
+};
+const nf = (n) => Math.round(n).toLocaleString("en-US");
+const totals = (entries) => entries.reduce((a, e) => ({ kcal: a.kcal + (Number(e.kcal) || 0), p: a.p + (Number(e.p) || 0) }), { kcal: 0, p: 0 });
+const listOf = (a) => (a.length <= 1 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]);
+const real = (entries) => (entries || []).filter((e) => e.source !== "skipped");
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// Did a day meet the standard for this goal?
+export function dayHit(entries, targets, goal = "gain") {
+  const t = totals(real(entries));
+  if (!t.kcal) return false;
+  const k = t.kcal / targets.kcal, p = t.p / targets.protein;
+  if (goal === "lose") return k <= 1.05 && k >= 0.75 && p >= 0.85;
+  return k >= 0.9 && p >= 0.85 && (goal !== "maintain" || k <= 1.1);
+}
+
+// Consecutive days on target, ending yesterday (today counts once it's hit).
+export function streakOf(logs, today, targets, goal) {
+  let n = dayHit(logs[today], targets, goal) ? 1 : 0;
+  for (let i = 1; i <= 90; i++) { if (dayHit(logs[addDaysISO(today, -i)], targets, goal)) n++; else break; }
+  return n;
+}
+
+export function weekGrade(logs, today, targets, goal) {
+  let hit = 0, logged = 0;
+  for (let i = 0; i < 7; i++) {
+    const es = logs[addDaysISO(today, -i)];
+    if (real(es).length) logged++;
+    if (dayHit(es, targets, goal)) hit++;
+  }
+  const verdict = hit >= 6 ? "Strong week. Keep the standard." : hit >= 4 ? "Inconsistent. The off days are costing you." : logged <= 2 ? "I can't coach what you don't log." : "Not good enough. Most days missed the target.";
+  return { hit, logged, verdict, level: hit >= 6 ? "good" : hit >= 4 ? "warn" : "bad" };
+}
+
+export function coach({ hour, today, targets, slots, logs = {}, water = {}, weights = [], profile = {}, adjustedOn = null, set = true }) {
+  const goal = profile.goal || "gain";
+  const entries = logs[today] || [];
+  const eaten = totals(entries);
+  const label = (s) => SLOT_META[s].label;
+  const loggedSlots = new Set(entries.map((e) => e.slot));
+  const skipped = slots.filter((s) => entries.some((e) => e.slot === s) && !real(entries).some((e) => e.slot === s));
+  const open = slots.filter((s) => !loggedSlots.has(s));
+  const overdue = open.filter((s) => hour >= DEADLINE[s]);
+  const shareSum = slots.reduce((a, s) => a + SLOT_META[s].share, 0) || 1;
+  const expectedFrac = slots.filter((s) => hour >= DEADLINE[s]).reduce((a, s) => a + SLOT_META[s].share, 0) / shareSum;
+  const expectedK = targets.kcal * expectedFrac;
+  const gap = Math.round(expectedK - eaten.kcal); // + means behind
+  const remK = Math.max(0, targets.kcal - eaten.kcal), remP = Math.max(0, targets.protein - eaten.p);
+  const st = slotTargets({ targets, eaten, openSlots: open });
+  const next = open.find((s) => hour < DEADLINE[s]);
+  const msgs = [];
+  const add = (level, id, title, body, action) => msgs.push({ level, id, title, body, action: action || null });
+
+  if (!set) add("warn", "setup", "I'm working with placeholder numbers.", "Give me your real height, weight and pace. Until then these targets are a guess.", { type: "targets", label: "Set my numbers" });
+
+  // 1. meals that should already be logged
+  if (overdue.length) {
+    const one = overdue.length === 1;
+    add("bad", "overdue",
+      `${cap(listOf(overdue.map((s) => label(s).toLowerCase())))} ${one ? "is" : "are"} overdue.`,
+      `It's ${fmtHour(hour)} and ${one ? "it isn't" : "they aren't"} logged. ` +
+      (gap > 50 ? `You're ${nf(gap)} kcal behind where you should be. Cook it or log it now.` : "If you ate, log it. Unlogged food doesn't count."),
+      { type: "slot", slot: overdue[0], label: `Do ${label(overdue[0]).toLowerCase()} now` });
+  }
+
+  // 2. every slot handled — judge the day
+  if (!open.length && entries.length) {
+    const k = eaten.kcal / targets.kcal, p = eaten.p / targets.protein;
+    if (goal === "lose" && k > 1.05) add("warn", "over", "Over target today.", `You're ${nf(eaten.kcal - targets.kcal)} kcal over. Don't make up for it by skipping tomorrow. Just hit the number.`);
+    else if (goal !== "lose" && k < 0.95) add("bad", "short", "All meals logged, still short.", `${nf(remK)} kcal and ${Math.round(remP)} g protein to go. Eat something before bed: a shake or peanut-butter toast covers most of it.`, { type: "log", label: "Log what I add" });
+    else if (p < 0.9) add("warn", "protein-short", "Calories hit, protein short.", `${Math.round(remP)} g of protein missing. Curd, paneer or eggs close that.`, { type: "log", label: "Log what I add" });
+    else add("good", "done", "Day done. Target hit.", `${nf(eaten.kcal)} of ${nf(targets.kcal)} kcal and ${Math.round(eaten.p)} g protein. Same again tomorrow.`);
+  }
+
+  // 3. skipped meals push the load onto what's left
+  if (skipped.length && open.length) {
+    const s = next || open[0];
+    add("warn", "skipped", `You skipped ${listOf(skipped.map((x) => label(x).toLowerCase()))}.`,
+      `Those calories didn't disappear. ${label(s)} now needs about ${nf(st[s].kcal)} kcal. Don't skip another.`, { type: "slot", slot: s, label: `Go to ${label(s).toLowerCase()}` });
+  }
+
+  // 4. protein behind pace
+  if (open.length && expectedFrac > 0 && eaten.p < targets.protein * expectedFrac * 0.8) {
+    add("warn", "protein", "Protein is lagging.",
+      `${Math.round(eaten.p)} of ${targets.protein} g. You need ${Math.round(remP)} g across ${open.length} more meal${open.length > 1 ? "s" : ""}, about ${Math.round(remP / open.length)} g each. Take the highest-protein option.`);
+  }
+
+  // 5. water
+  if (hour >= 10) {
+    const w = water[today] || 0;
+    const expW = targets.water * Math.max(0, Math.min(1, (hour - 7) / 15));
+    if (w < expW * 0.6) add("warn", "water", "Drink water.", `${nf(w)} of ${nf(targets.water)} ml. You should be near ${nf(Math.round(expW / 100) * 100)} ml by now. Drink 500 ml before anything else.`, { type: "water", label: "+500 ml" });
+  }
+
+  // 6. yesterday's verdict, until today is underway
+  if (hour < 12 || !entries.length) {
+    const yes = real(logs[addDaysISO(today, -1)]);
+    const hasHistory = Object.keys(logs).some((d) => d < addDaysISO(today, -1) && real(logs[d]).length);
+    if (yes.length) {
+      const y = totals(yes), k = y.kcal / targets.kcal, p = y.p / targets.protein;
+      if (goal === "lose") {
+        if (k > 1.1) add("bad", "yesterday", `Yesterday: ${nf(y.kcal - targets.kcal)} kcal over.`, "One day doesn't sink you. A habit does. Hit the number today.");
+        else if (k >= 0.75 && p >= 0.85) add("good", "yesterday", "Yesterday: on target.", "That's the standard. Repeat it.");
+      } else if (k < 0.85) add("bad", "yesterday", `Yesterday: ${nf(y.kcal)} of ${nf(targets.kcal)} kcal. ${nf(targets.kcal - y.kcal)} short.`, "You don't gain on days like that. No gaps today.");
+      else if (k >= 0.95 && p >= 0.9) add("good", "yesterday", "Yesterday: target hit.", "That's the standard. Repeat it.");
+      else add("warn", "yesterday", "Yesterday: close, not there.", `${nf(y.kcal)} of ${nf(targets.kcal)} kcal, ${Math.round(y.p)} of ${targets.protein} g protein. Close the last bit today.`);
+    } else if (hasHistory) add("bad", "yesterday", "Nothing logged yesterday.", "If you ate, I couldn't count it. Log every meal today, no gaps.");
+  }
+
+  // 7. weigh-ins and whether the scale agrees with the plan
+  const ws = [...weights].sort((a, b) => a.date.localeCompare(b.date));
+  const last = ws[ws.length - 1];
+  if (!last) add("warn", "weigh", "No weigh-in yet.", "I can't tell if this plan is working without a scale. Weigh in tomorrow morning, before you eat.", { type: "insights", label: "Log my weight" });
+  else if (daysBetween(last.date, today) >= 7) add("warn", "weigh", `No weigh-in for ${daysBetween(last.date, today)} days.`, "I can't adjust your plan blind. Weigh in tomorrow morning, before you eat.", { type: "insights", label: "Log my weight" });
+  const recentW = ws.filter((w) => daysBetween(w.date, today) <= 35);
+  const cooled = !adjustedOn || daysBetween(adjustedOn, today) >= 10;
+  if (goal !== "maintain" && cooled && recentW.length >= 2) {
+    const a = recentW[0], b = recentW[recentW.length - 1], span = daysBetween(a.date, b.date);
+    if (span >= 10) {
+      const pace = Number(profile.pace) || 0.5;
+      const rate = ((b.kg - a.kg) / span) * 7 * (goal === "lose" ? -1 : 1); // progress toward the goal, kg/week
+      const word = goal === "lose" ? "Losing" : "Gaining";
+      if (rate < pace * 0.5) add("bad", "trend", `${word} ${rate.toFixed(2)} kg a week. Target is ${pace}.`,
+        goal === "lose" ? "The scale says you're eating more than planned. I'm taking 150 kcal a day off." : "The scale says you're under-eating. I'm asking for 150 kcal more a day.",
+        { type: "adjust", delta: goal === "lose" ? -150 : 150, label: goal === "lose" ? "Cut 150 kcal from my target" : "Add 150 kcal to my target" });
+      else if (rate > pace * 1.6) add("warn", "trend", `${word} ${rate.toFixed(2)} kg a week. Too fast.`,
+        goal === "lose" ? "That pace costs muscle. Add 150 kcal a day." : `Past ${pace} kg a week it's mostly fat. Trim 150 kcal a day.`,
+        { type: "adjust", delta: goal === "lose" ? 150 : -150, label: goal === "lose" ? "Add 150 kcal to my target" : "Cut 150 kcal from my target" });
+    }
+  }
+
+  // 8. nothing wrong right now — say what's next
+  if (next) {
+    const title = overdue.length ? "After that:" : !entries.length ? "Start the day right." : "On pace. Keep going.";
+    add("good", "next", title, `${label(next)} by ${fmtHour(DEADLINE[next])}: about ${nf(st[next].kcal)} kcal and ${Math.round(st[next].protein)} g protein.`, { type: "slot", slot: next, label: `See ${label(next).toLowerCase()}` });
+  }
+
+  const order = { bad: 0, warn: 1, good: 2 };
+  msgs.sort((a, b) => order[a.level] - order[b.level]);
+  return {
+    messages: msgs, overdue, open, gap, expectedK, eaten,
+    behind: goal !== "lose" && gap > targets.kcal * 0.05,
+    problems: overdue.length + msgs.filter((m) => m.level === "bad" && m.id !== "overdue").length,
+    streak: streakOf(logs, today, targets, goal),
+  };
 }
 
 /* ───────────────────────────── weekly plan + shopping ───────────────────────────── */

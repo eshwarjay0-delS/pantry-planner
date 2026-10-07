@@ -13,7 +13,7 @@ import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import {
   SLOTS, SLOT_META, addDaysISO, daysBetween, isoOf, FOODS, fmtAmount, ALL_LIBRARY, macrosOf, withMacros,
   recipeNeeds, indexPantry, deductFromPantry, computeTargets, slotTargets, rankRecipes, planWeek,
-  shoppingNeeds, fmtBuy, buildMatrix, cookable, unlocks,
+  shoppingNeeds, fmtBuy, buildMatrix, cookable, unlocks, suggestDay, coach, weekGrade, targetsFor, DEADLINE, fmtHour,
 } from "./engine.js";
 
 /* ─────────────────────────────  constants  ───────────────────────────── */
@@ -1630,6 +1630,19 @@ const sumEntries = (entries) => entries.reduce((a, e) => ({
 }), { kcal: 0, p: 0, c: 0, f: 0 });
 const guessSlot = () => { const h = new Date().getHours(); return h < 11 ? "breakfast" : h < 16 ? "lunch" : h < 21 ? "dinner" : "snack"; };
 
+// Hour of the day as a decimal (14.5 = 2:30 pm), refreshed every minute and whenever the app comes back into view.
+function useClock() {
+  const read = () => { const d = new Date(); return d.getHours() + d.getMinutes() / 60; };
+  const [h, setH] = useState(read);
+  useEffect(() => {
+    const tick = () => setH(read());
+    const id = setInterval(tick, 60000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, []);
+  return h;
+}
+
 function useToday() {
   const [t, setT] = useState(todayISO());
   useEffect(() => {
@@ -1860,7 +1873,7 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
           <Pin size={14} /> {planned ? "Unplan" : "Plan this"}
         </button>
         <button onClick={() => setExtra({ cook: round1(servings + 1), eat: servings })} className="text-stone-500">Cooked extra…</button>
-        <button onClick={() => skipMeal(slot)} className="text-stone-500">Skip meal</button>
+        <button onClick={() => { if (window.confirm(`Skip ${meta.label.toLowerCase()}? Its ${Math.round(target.kcal)} kcal move onto the meals you have left today.`)) skipMeal(slot); }} className="text-stone-500">Skip meal</button>
         {aiReady() && <button onClick={more} disabled={busy} className="text-stone-500 flex items-center gap-1">{busy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} More ideas</button>}
       </div>
 
@@ -1878,8 +1891,44 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
   );
 }
 
+const LEVEL_DOT = { bad: "bg-rose-500", warn: "bg-amber-400", good: "bg-emerald-400" };
+
+function CoachCard({ c, onAct }) {
+  const [more, setMore] = useState(false);
+  const top = c.messages[0];
+  if (!top) return null;
+  const rest = c.messages.slice(1);
+  return (
+    <div className="rounded-3xl bg-stone-900 text-white p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-bold uppercase tracking-widest text-stone-400 flex items-center gap-1.5">
+          <span className={`h-2 w-2 rounded-full ${LEVEL_DOT[top.level]}`} /> Your trainer
+        </span>
+        <span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${c.streak ? "bg-amber-400 text-stone-900" : "bg-white/10 text-stone-300"}`}>
+          {c.streak ? `🔥 ${c.streak}-day streak` : "No streak yet"}
+        </span>
+      </div>
+      <p className="mt-2 text-lg font-extrabold leading-snug" style={{ fontFamily: HEAD }}>{top.title}</p>
+      <p className="text-sm text-stone-300 mt-1">{top.body}</p>
+      {top.action && <button onClick={() => onAct(top.action)} className="mt-3 h-10 px-4 rounded-xl bg-white text-stone-900 font-bold text-sm active:scale-95">{top.action.label}</button>}
+      {rest.length > 0 && (
+        <button onClick={() => setMore(!more)} className="mt-3 block text-xs font-bold text-stone-400">
+          {more ? "Hide" : `${rest.length} more from your trainer`}
+        </button>
+      )}
+      {more && rest.map((m) => (
+        <div key={m.id} className="mt-2 pt-2 border-t border-white/10">
+          <p className="text-sm font-bold flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full shrink-0 ${LEVEL_DOT[m.level]}`} />{m.title}</p>
+          <p className="text-xs text-stone-300 mt-0.5">{m.body}</p>
+          {m.action && <button onClick={() => onAct(m.action)} className="mt-1.5 text-xs font-bold text-white underline underline-offset-2">{m.action.label}</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TodayTab({ openLog, openTargets }) {
-  const { today, fit, pantry, recipes, byId, addWater, eatLeftover, planNextWeek, setTab } = useApp();
+  const { today, fit, pantry, recipes, byId, addWater, eatLeftover, planNextWeek, setTab, trainer, adjustKcal } = useApp();
   const t = fit.targets;
   const visibleSlots = fit.prefs.snack ? SLOTS : SLOTS.filter((s) => s !== "snack");
   const logsToday = fit.logs[today] || [];
@@ -1892,18 +1941,16 @@ function TodayTab({ openLog, openTargets }) {
 
   const recent = new Set();
   for (let i = 1; i <= 2; i++) (fit.logs[addDaysISO(today, -i)] || []).forEach((e) => e.rid && recent.add(e.rid));
-  const used = new Set(logsToday.map((e) => e.rid).filter(Boolean));
-  const optsBySlot = {};
+  // Every dish for each open slot, best first, and never the same dish under two meals.
+  const pinned = {};
   for (const slot of openSlots) {
-    let opts = rankRecipes({ recipes, slot, target: stg[slot], pindex, dayKey: today, avoid: new Set(used), recent, limit: 5 });
     const lk = planToday[slot];
-    if (lk && !lk.status && byId[lk.rid]) {
-      const r = byId[lk.rid];
-      opts = [{ recipe: r, servings: lk.servings }, ...opts.filter((o) => o.recipe.id !== r.id)];
-    }
-    optsBySlot[slot] = opts;
-    if (opts[0]) used.add(opts[0].recipe.id);
+    if (lk && !lk.status && byId[lk.rid]) pinned[slot] = { recipe: byId[lk.rid], servings: lk.servings };
   }
+  const optsBySlot = suggestDay({
+    recipes, slots: openSlots, targets: stg, pindex, dayKey: today, pinned, recent,
+    avoid: new Set(logsToday.map((e) => e.rid).filter(Boolean)),
+  });
 
   const scroller = useRef(null);
   const [active, setActive] = useState(0);
@@ -1920,6 +1967,16 @@ function TodayTab({ openLog, openTargets }) {
     setActive((a) => (a === i ? a : i));
   };
   const goTo = (i) => { const el = scroller.current; if (el) el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" }); };
+  // What the trainer's buttons do.
+  const act = (a) => {
+    if (a.type === "slot") { const i = visibleSlots.indexOf(a.slot); if (i >= 0) { goTo(i); if (scroller.current) scroller.current.scrollIntoView({ behavior: "smooth", block: "center" }); } }
+    else if (a.type === "log") openLog("");
+    else if (a.type === "water") addWater(500);
+    else if (a.type === "insights") setTab("today", "insights");
+    else if (a.type === "targets") openTargets();
+    else if (a.type === "adjust") adjustKcal(a.delta);
+  };
+  const matrix = React.useMemo(() => buildMatrix(recipes), [recipes]);
   // The row would otherwise be as tall as its tallest card; track the visible card's height instead.
   const slides = useRef([]);
   const [slideH, setSlideH] = useState(null);
@@ -1946,14 +2003,9 @@ function TodayTab({ openLog, openTargets }) {
         </div>
         <Btn variant="outline" size="sm" onClick={openTargets}><Target size={14} /> Targets</Btn>
       </div>
+      <p className="!mt-1 text-xs text-stone-500 tabular-nums">{t.profile.weightKg} kg · {t.profile.goal === "maintain" ? "maintain" : `${t.profile.goal} ${t.profile.pace} kg/week`} · {t.kcal} kcal · {t.protein} g protein a day</p>
 
-      {!t.set && (
-        <button onClick={openTargets} className="w-full text-left rounded-2xl bg-amber-50 ring-1 ring-amber-200 p-3 flex items-center gap-3">
-          <div className="h-9 w-9 rounded-xl bg-amber-500 text-white grid place-items-center"><Target size={18} /></div>
-          <div className="flex-1"><p className="font-bold text-amber-900 text-sm">Set your plan</p><p className="text-xs text-amber-800">Check your height, weight and pace so the daily numbers fit you.</p></div>
-          <ChevronRight size={18} className="text-amber-700" />
-        </button>
-      )}
+      <CoachCard c={trainer} onAct={act} />
 
       <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4 flex items-center gap-4">
         <Ring value={eaten.kcal} max={t.kcal} color={over ? "#e11d48" : "#047857"}>
@@ -1966,7 +2018,12 @@ function TodayTab({ openLog, openTargets }) {
           <MacroBar label="Protein" value={eaten.p} max={t.protein} color="#047857" />
           <MacroBar label="Carbs" value={eaten.c} max={t.carbs} color="#d97706" />
           <MacroBar label="Fat" value={eaten.f} max={t.fat} color="#0284c7" />
-          <p className="text-[11px] text-stone-400 tabular-nums">{Math.round(eaten.kcal)} of {t.kcal} kcal eaten</p>
+          <p className="text-[11px] text-stone-400 tabular-nums">
+            {Math.round(eaten.kcal)} of {t.kcal} kcal eaten
+            {trainer.behind
+              ? <span className="ml-1.5 font-bold text-rose-600">· {Math.round(trainer.gap)} behind pace</span>
+              : trainer.expectedK > 0 && <span className="ml-1.5 font-bold text-emerald-700">· on pace</span>}
+          </p>
         </div>
       </div>
 
@@ -2003,6 +2060,20 @@ function TodayTab({ openLog, openTargets }) {
         ))}
       </div>
       <p className="text-center text-[11px] text-stone-400 -mt-1">Swipe sideways for the next meal · use ‹ › on a card for other ideas</p>
+      {(() => {
+        const slot = visibleSlots[active];
+        if (!slot || doneSlots.has(slot)) return null;
+        const have = [...Object.keys(pindex).filter((k) => pindex[k].grams > 0), ...(fit.prefs.extraHave || [])];
+        const tips = unlocks(matrix, have, { slot }).slice(0, 3);
+        if (!tips.length) return null;
+        return (
+          <button onClick={() => setTab("meals", "cook")} className="w-full text-left rounded-2xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2 text-sm text-amber-900">
+            <span className="font-bold">One item away from more {SLOT_META[slot].label.toLowerCase()}s:</span>{" "}
+            {tips.map((x, i) => <span key={x.key}>{i > 0 && " · "}{x.name.replace(/ \(.*\)/, "")} → {x.n} more</span>)}
+            <span className="block text-[11px] text-amber-700 mt-0.5">Tap to see every dish and what each one is missing.</span>
+          </button>
+        );
+      })()}
 
       {fit.leftovers.length > 0 && (
         <div>
@@ -2171,7 +2242,8 @@ function TargetsSheet({ open, onClose }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const calc = computeTargets(p);
+  const adj = Number(t.adjust) || 0;
+  const calc = targetsFor(p, adj);
   const kcal = custom ? Number(man.kcal) || 0 : calc.kcal;
   const protein = custom ? Number(man.protein) || 0 : calc.protein;
   const fat = custom ? Number(man.fat) || 0 : calc.fat;
@@ -2182,7 +2254,7 @@ function TargetsSheet({ open, onClose }) {
 
   const save = () => {
     const profile = { ...p, age: Number(p.age) || 25, heightCm: Number(p.heightCm) || 170, weightKg: Number(p.weightKg) || 60, pace: Number(p.pace) || 0.5 };
-    saveTargets({ profile, kcal, protein, fat, carbs, water, set: true, manual: custom });
+    saveTargets({ profile, kcal, protein, fat, carbs, water, set: true, manual: custom, adjust: custom ? 0 : adj });
     onClose();
   };
 
@@ -2210,6 +2282,7 @@ function TargetsSheet({ open, onClose }) {
           ))}
         </div>
         <p className="mt-2 text-xs text-stone-500">Protein is {perKg.toFixed(1)} g per kg of body weight · water {water} ml</p>
+        {!custom && adj !== 0 && <p className="mt-1 text-xs font-semibold text-stone-600">Includes your trainer's {adj > 0 ? "+" : "−"}{Math.abs(adj)} kcal adjustment from your weigh-ins.</p>}
         {perKg > 2.6 && <p className="mt-1 text-xs font-semibold text-amber-700">That's above the usual 1.6–2.2 g/kg range, and expensive to hit with food.</p>}
       </div>
 
@@ -2265,10 +2338,17 @@ function InsightsTab() {
   const weights = [...(fit.weights || [])].sort((a, b) => a.date.localeCompare(b.date));
   const lastW = weights[weights.length - 1];
   const dayLetter = (d) => toDate(d).toLocaleDateString(undefined, { weekday: "narrow" });
+  const grade = weekGrade(fit.logs, today, t, t.profile.goal);
 
   return (
     <div className="px-4 pt-3 pb-4 space-y-3">
       <h1 className="text-2xl font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>Insights</h1>
+
+      <div className="rounded-3xl bg-stone-900 text-white p-4">
+        <span className="text-[11px] font-bold uppercase tracking-widest text-stone-400 flex items-center gap-1.5"><span className={`h-2 w-2 rounded-full ${LEVEL_DOT[grade.level]}`} /> This week's verdict</span>
+        <p className="mt-2 text-lg font-extrabold leading-snug" style={{ fontFamily: HEAD }}>{grade.hit} of 7 days on target.</p>
+        <p className="text-sm text-stone-300 mt-1">{grade.verdict}</p>
+      </div>
 
       {logged.length === 0 ? (
         <Empty icon={TrendingUp} title="No meals logged this week" sub="Log a meal under Today and your weekly numbers will show up here."
@@ -2574,6 +2654,7 @@ export default function App() {
   const setView = (t, v) => setViews((s) => ({ ...s, [t]: v }));
   const setTab = (t, v) => { setTabRaw(t); if (v) setView(t, v); };
   const today = useToday();
+  const hour = useClock();
   const [fit, setFit] = useState(() => normalizeFit(null));
   const [logSheet, setLogSheet] = useState(null);   // { slot } while the log sheet is open
   const [targetsOpen, setTargetsOpen] = useState(false);
@@ -2830,8 +2911,42 @@ export default function App() {
   });
 
   const addWater = (ml) => patchFit((f) => ({ ...f, water: { ...f.water, [today]: Math.max(0, (f.water[today] || 0) + ml) } }));
-  const addWeight = (kg) => patchFit((f) => ({ ...f, weights: [...(f.weights || []).filter((w) => w.date !== today), { date: today, kg }] }));
-  const saveTargets = (t) => { patchFit((f) => ({ ...f, targets: { ...f.targets, ...t } })); notify("Targets saved"); };
+  // A weigh-in is the truth: it becomes your profile weight and the targets are recalculated from it.
+  const addWeight = (kg) => {
+    const tg = fit.targets;
+    const profile = { ...tg.profile, weightKg: kg };
+    const next = tg.manual ? {} : targetsFor(profile, tg.adjust);
+    patchFit((f) => ({
+      ...f,
+      weights: [...(f.weights || []).filter((w) => w.date !== today), { date: today, kg }],
+      targets: { ...f.targets, ...next, profile },
+    }));
+    notify(tg.manual || (next.kcal === tg.kcal && next.protein === tg.protein) ? `${kg} kg logged` : `${kg} kg logged · targets now ${next.kcal} kcal, ${next.protein} g protein`);
+  };
+  const saveTargets = (t) => { patchFit((f) => ({ ...f, targets: { ...f.targets, ...t } })); notify(`Targets saved · ${t.kcal} kcal, ${t.protein} g protein`); };
+  // The trainer moves the calorie target when the scale disagrees with the plan.
+  const adjustKcal = (delta) => withUndo(`Target ${delta > 0 ? "raised" : "cut"} by ${Math.abs(delta)} kcal`, () => patchFit((f) => {
+    const tg = f.targets;
+    const adjust = (Number(tg.adjust) || 0) + delta;
+    const next = tg.manual
+      ? { kcal: tg.kcal + delta, carbs: Math.max(0, Math.round((tg.kcal + delta - tg.protein * 4 - tg.fat * 9) / 4 / 5) * 5) }
+      : targetsFor(tg.profile, adjust);
+    return { ...f, targets: { ...tg, ...next, adjust, adjustedOn: today } };
+  }));
+  const coachSlots = fit.prefs.snack ? SLOTS : SLOTS.filter((s) => s !== "snack");
+  const trainer = React.useMemo(() => coach({
+    hour, today, targets: fit.targets, slots: coachSlots, logs: fit.logs, water: fit.water, weights: fit.weights,
+    profile: fit.targets.profile, adjustedOn: fit.targets.adjustedOn || null, set: !!fit.targets.set,
+  }), [hour, today, fit]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Chase: the tab title carries the count, and coming back to the app lands on what's overdue.
+  const problemsRef = useRef(0);
+  problemsRef.current = trainer.problems;
+  useEffect(() => { document.title = trainer.problems ? `(${trainer.problems}) Behind · Pantry Planner` : "Pantry Planner"; }, [trainer.problems]);
+  useEffect(() => {
+    const h = () => { if (document.visibilityState === "visible" && problemsRef.current) { setTabRaw("today"); setViews((s) => ({ ...s, today: "today" })); window.scrollTo(0, 0); } };
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  }, []);
   const setSnack = (on) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, snack: on } }));
   const setExtraHave = (keys) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, extraHave: keys } }));
   const rememberDishes = (items) => patchFit((f) => {
@@ -2856,7 +2971,7 @@ export default function App() {
 
   const ctx = {
     today, fit, recipes, byId, setTab, withUndo, logEntries, removeEntry, cookMeal, skipMeal, eatLeftover,
-    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack, setExtraHave,
+    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack, setExtraHave, trainer, adjustKcal, hour,
     rememberDishes, addAiRecipes, openLog, openSettings,
     pantry, meals, trips, ideas, setIdeas, ideasSig, setIdeasSig, notify,
     addItem, updateItem, adjustQty, removeItem, clearPantry, replacePantry, addOrMerge,
@@ -2865,7 +2980,7 @@ export default function App() {
 
   const expiringCount = pantry.filter((i) => i.expiry && daysUntil(i.expiry) <= 3).length;
   const plannedCount = meals.filter((m) => m.scheduledDate && daysUntil(m.scheduledDate) === 0).length;
-  const badges = { inventory: expiringCount, meals: plannedCount };
+  const badges = { today: trainer.problems, inventory: expiringCount, meals: plannedCount };
 
   if (!CONFIGURED) return <ConfigNeeded />;
   if (!authReady) return <div className="min-h-screen grid place-items-center bg-stone-50 text-emerald-700"><Loader2 className="animate-spin" /></div>;
@@ -2944,7 +3059,7 @@ export default function App() {
                 className={`relative py-2.5 flex flex-col items-center gap-0.5 transition ${tab === id ? "text-emerald-700" : "text-stone-400"}`}>
                 <div className="relative">
                   <Icon size={22} strokeWidth={tab === id ? 2.4 : 2} />
-                  {badges[id] > 0 && <span className="absolute -top-1.5 -right-2 min-w-4 h-4 px-1 rounded-full bg-amber-500 text-white text-[10px] font-bold grid place-items-center">{badges[id]}</span>}
+                  {badges[id] > 0 && <span className={`absolute -top-1.5 -right-2 min-w-4 h-4 px-1 rounded-full text-white text-[10px] font-bold grid place-items-center ${id === "today" ? "bg-rose-600" : "bg-amber-500"}`}>{badges[id]}</span>}
                 </div>
                 <span className={`text-[10px] ${tab === id ? "font-bold" : "font-semibold"}`}>{label}</span>
                 {tab === id && <span className="absolute -bottom-0 h-0.5 w-8 rounded-full bg-emerald-700" />}
