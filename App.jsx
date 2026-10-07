@@ -5,10 +5,16 @@ import {
   Star, CalendarPlus, CalendarClock, TrendingUp, Receipt, AlertTriangle,
   CircleCheck, Clock, DollarSign, Store, ChevronRight, RotateCcw, Lightbulb,
   Cog, KeyRound, ExternalLink, ClipboardList, LogOut, LogIn, ShieldCheck, BookOpen,
+  ChevronLeft, Pin, Target, Droplet, Home, BarChart3,
 } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from "firebase/auth";
 import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
+import {
+  SLOTS, SLOT_META, addDaysISO, daysBetween, isoOf, FOODS, fmtAmount, ALL_LIBRARY, macrosOf, withMacros,
+  recipeNeeds, indexPantry, deductFromPantry, computeTargets, slotTargets, rankRecipes, planWeek,
+  shoppingNeeds, fmtBuy,
+} from "./engine.js";
 
 /* ─────────────────────────────  constants  ───────────────────────────── */
 
@@ -54,13 +60,18 @@ async function loadUserData(uid) {
   try {
     const snap = await getDoc(doc(db, "users", uid));
     const d = snap.exists() ? snap.data() : {};
-    return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [], ideas: d.ideas || [], ideasSig: d.ideasSig || "" };
+    return { pantry: d.pantry || [], meals: d.meals || [], trips: d.trips || [], ideas: d.ideas || [], ideasSig: d.ideasSig || "", fit: normalizeFit(d.fit) };
   } catch (e) {
-    return { pantry: [], meals: [], trips: [], ideas: [], ideasSig: "", error: e.message };
+    return { pantry: [], meals: [], trips: [], ideas: [], ideasSig: "", fit: normalizeFit(null), error: e.message };
   }
 }
 async function saveUserData(uid, data) {
-  try { await setDoc(doc(db, "users", uid), data, { merge: true }); } catch (_) {}
+  try {
+    // JSON round-trip strips `undefined`, which Firestore rejects (and we'd never see the error).
+    // mergeFields replaces each listed field wholesale, so deleted plan/log keys really disappear.
+    const clean = JSON.parse(JSON.stringify(data));
+    await setDoc(doc(db, "users", uid), clean, { mergeFields: Object.keys(clean) });
+  } catch (e) { console.warn("Save failed", e); }
 }
 
 // Instant local cache for meal ideas, written synchronously the moment they're
@@ -81,9 +92,9 @@ function clearIdeasCache(uid) {
 /* ─────────────────────────────  helpers  ─────────────────────────────── */
 
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => isoOf(new Date());
 const toDate = (iso) => new Date(iso + "T12:00:00");
-const addDays = (iso, n) => { const d = toDate(iso); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const addDays = (iso, n) => addDaysISO(iso, n);
 const daysUntil = (iso) => Math.round((toDate(iso) - toDate(todayISO())) / 86400000);
 const fmtShort = (iso) => toDate(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const fmtLong = (iso) => toDate(iso).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
@@ -538,7 +549,9 @@ function ConfBadge({ c }) {
   return <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${map[c] || map.medium}`}>{c}</span>;
 }
 
+const QTY_STEP = { g: 50, kg: 0.25, lb: 0.5, oz: 4, ml: 100, L: 0.25, cup: 0.5, pcs: 1, dozen: 1, pack: 1 };
 function InvRow({ item, onAdjust, onEdit, onDelete }) {
+  const step = QTY_STEP[item.unit] || 1;
   const [dx, setDx] = useState(0);
   const [dragging, setDragging] = useState(false);
   const start = useRef(0);
@@ -548,8 +561,8 @@ function InvRow({ item, onAdjust, onEdit, onDelete }) {
   const down = (e) => { start.current = e.clientX; setDragging(true); e.currentTarget.setPointerCapture(e.pointerId); };
   const move = (e) => { if (!dragging) return; setDx(Math.max(-96, Math.min(96, e.clientX - start.current))); };
   const up = () => {
-    if (dx >= TH) onAdjust(item.id, +1);
-    else if (dx <= -TH) onAdjust(item.id, -1);
+    if (dx >= TH) onAdjust(item.id, +step);
+    else if (dx <= -TH) onAdjust(item.id, -step);
     setDx(0); setDragging(false);
   };
 
@@ -557,8 +570,8 @@ function InvRow({ item, onAdjust, onEdit, onDelete }) {
     <div className="relative overflow-hidden rounded-2xl">
       {/* swipe reveals */}
       <div className="absolute inset-0 flex items-center justify-between px-5 text-white font-bold">
-        <span className={`flex items-center gap-1 transition-opacity ${dx > 8 ? "opacity-100" : "opacity-0"}`}><Plus size={18} /> Add one</span>
-        <span className={`flex items-center gap-1 transition-opacity ${dx < -8 ? "opacity-100" : "opacity-0"}`}>Use one <Minus size={18} /></span>
+        <span className={`flex items-center gap-1 transition-opacity ${dx > 8 ? "opacity-100" : "opacity-0"}`}><Plus size={18} /> Add {step}</span>
+        <span className={`flex items-center gap-1 transition-opacity ${dx < -8 ? "opacity-100" : "opacity-0"}`}>Use {step} <Minus size={18} /></span>
       </div>
       <div className="absolute inset-0 flex">
         <div className="flex-1 bg-emerald-500" style={{ opacity: Math.max(0, dx) / 96 }} />
@@ -582,9 +595,9 @@ function InvRow({ item, onAdjust, onEdit, onDelete }) {
         </div>
         {/* stepper */}
         <div className="flex items-center gap-1 shrink-0">
-          <button onClick={() => onAdjust(item.id, -1)} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 hover:bg-rose-100 hover:text-rose-600 active:scale-95"><Minus size={15} /></button>
-          <span className="w-12 text-center font-bold text-stone-800 tabular-nums">{item.quantity}<span className="text-[10px] font-medium text-stone-400 ml-0.5">{item.unit}</span></span>
-          <button onClick={() => onAdjust(item.id, +1)} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 hover:bg-emerald-100 hover:text-emerald-600 active:scale-95"><Plus size={15} /></button>
+          <button onClick={() => onAdjust(item.id, -step)} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 hover:bg-rose-100 hover:text-rose-600 active:scale-95"><Minus size={15} /></button>
+          <span className="w-14 text-center font-bold text-stone-800 tabular-nums">{item.quantity}<span className="text-[10px] font-medium text-stone-400 ml-0.5">{item.unit}</span></span>
+          <button onClick={() => onAdjust(item.id, +step)} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 hover:bg-emerald-100 hover:text-emerald-600 active:scale-95"><Plus size={15} /></button>
         </div>
         <button onClick={() => onEdit(item)} className="h-8 w-8 grid place-items-center rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-600 shrink-0"><Pencil size={14} /></button>
       </div>
@@ -934,7 +947,7 @@ function RecipeSheet({ dish, pantry, steps, loading, err, onSave, onPlan, planne
   );
 }
 
-function MealsTab() {
+function MealIdeas() {
   const { pantry, meals, ideas, setIdeas, ideasSig, setIdeasSig, addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, notify } = useApp();
   const [busy, setBusy] = useState(false);      // true only for the first, explicit generate
   const [refreshing, setRefreshing] = useState(false); // true for silent background auto-refresh
@@ -1340,6 +1353,7 @@ function ShoppingTab() {
   return (
     <div className="px-4 pt-2 pb-4">
       {node}
+      <PlanShopping />
       {/* stats */}
       <div className="grid grid-cols-3 gap-2">
         {[["Total spent", money(total)], ["Trips", String(trips.length)], ["Avg / trip", money(avg)]].map(([l, v]) => (
@@ -1579,16 +1593,828 @@ function ConfigNeeded() {
 
 /* ─────────────────────────────  root app  ─────────────────────────────── */
 
+/* ─────────────────────────────  Fit: state shape, AI helpers  ─────────────────────────────── */
+
+const DEFAULT_PROFILE = { sex: "male", age: 26, heightCm: 170, weightKg: 60, activity: "light", goal: "gain", pace: 0.5 };
+const DEFAULT_FIT = {
+  targets: { ...computeTargets(DEFAULT_PROFILE), profile: DEFAULT_PROFILE, set: false, manual: false },
+  logs: {},        // { "YYYY-MM-DD": [entry] }
+  water: {},       // { "YYYY-MM-DD": ml }
+  plan: {},        // { "YYYY-MM-DD": { slot: { rid, servings, status? } } }
+  leftovers: [],
+  dishMemory: {},  // { dishKey: { scale, n } } — remembers how you correct portion estimates
+  weights: [],     // [{ date, kg }]
+  userRecipes: [], // AI-made recipes built only from known ingredients
+  prefs: { snack: true },
+};
+
+function normalizeFit(raw) {
+  const f = raw || {};
+  const t = f.targets && f.targets.kcal ? f.targets : DEFAULT_FIT.targets;
+  return { ...DEFAULT_FIT, ...f, targets: t, prefs: { ...DEFAULT_FIT.prefs, ...(f.prefs || {}) } };
+}
+// Keep the user doc small: ~2 months of logs, 2 weeks of plan.
+function pruneFit(fit, today) {
+  const keep = (obj, days) => Object.fromEntries(Object.entries(obj || {}).filter(([d]) => daysBetween(d, today) <= days));
+  return {
+    ...fit,
+    logs: keep(fit.logs, 60), water: keep(fit.water, 60), plan: keep(fit.plan, 14),
+    leftovers: (fit.leftovers || []).filter((l) => daysBetween(l.date, today) <= 3),
+    weights: (fit.weights || []).slice(-200),
+  };
+}
+
+const round1 = (x) => Math.round((Number(x) || 0) * 10) / 10;
+const sumEntries = (entries) => entries.reduce((a, e) => ({
+  kcal: a.kcal + (Number(e.kcal) || 0), p: a.p + (Number(e.p) || 0), c: a.c + (Number(e.c) || 0), f: a.f + (Number(e.f) || 0),
+}), { kcal: 0, p: 0, c: 0, f: 0 });
+const guessSlot = () => { const h = new Date().getHours(); return h < 11 ? "breakfast" : h < 16 ? "lunch" : h < 21 ? "dinner" : "snack"; };
+
+function useToday() {
+  const [t, setT] = useState(todayISO());
+  useEffect(() => {
+    const tick = () => setT((cur) => { const n = todayISO(); return n === cur ? cur : n; });
+    const id = setInterval(tick, 30000);
+    document.addEventListener("visibilitychange", tick);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", tick); };
+  }, []);
+  return t;
+}
+
+// Photo and/or text → editable list of foods with grams + macros.
+async function estimateMeal({ images, note }) {
+  const n = images.length;
+  const system =
+    "You are a careful nutrition estimator for home-cooked and restaurant food, especially Indian vegetarian cooking. " +
+    "Return ONLY valid JSON, no prose, no markdown fences.";
+  const user =
+    (n ? `You are given ${n} photo${n > 1 ? "s" : ""} of one meal or snack${n > 1 ? " (different angles or separate items)" : ""}. ` : "") +
+    (note ? `The person describes it as: "${note.slice(0, 400)}". ` : "") +
+    "Identify each distinct dish or food and estimate the portion actually shown as ready-to-eat weight in grams. " +
+    'Return {"items":[{"name": string, "grams": number, "kcal": number, "protein": number, "carbs": number, "fat": number, "confidence": "high"|"medium"|"low"}]}. ' +
+    "One entry per dish (for example 'Dal tadka', 'Roti', 'Steamed rice'), not per ingredient. " +
+    "Protein, carbs and fat are grams for the whole portion, and kcal should roughly equal 4*protein + 4*carbs + 9*fat. " +
+    "Do not invent items that are not visible or described.";
+  const out = parseJSON(await callClaude({ system, user, images, tier: "light", maxTokens: 1500 }));
+  return (out.items || []).map((it) => {
+    const p = Math.max(0, Number(it.protein) || 0), c = Math.max(0, Number(it.carbs) || 0), f = Math.max(0, Number(it.fat) || 0);
+    const calc = 4 * p + 4 * c + 9 * f;
+    let kcal = Math.max(0, Number(it.kcal) || 0);
+    if (!kcal || (calc && Math.abs(kcal - calc) / calc > 0.25)) kcal = Math.round(calc); // keep the numbers self-consistent
+    return {
+      name: String(it.name || "").trim(), grams: Math.max(0, Number(it.grams) || 0), kcal, p, c, f,
+      confidence: ["high", "medium", "low"].includes(it.confidence) ? it.confidence : "medium",
+    };
+  }).filter((it) => it.name && it.kcal > 0);
+}
+
+// New recipes built ONLY from ingredients the engine knows, so macros and pantry maths stay exact.
+async function aiRecipes(slot, existingNames) {
+  const keys = Object.values(FOODS).map((f) => `${f.key} (${f.name})`).join(", ");
+  const system = "You are an Indian home cook and sports dietitian. Return ONLY valid JSON, no prose, no markdown fences.";
+  const user =
+    `Create 6 NEW vegetarian (eggs and dairy allowed) Indian home-cooking recipes suited to ${slot}. ` +
+    `Use ONLY these ingredient keys: ${keys}. ` +
+    "Salt, spices, ginger, garlic, chilies, herbs and lemon are always available — do not list them. " +
+    "Give each ingredient in grams for ONE serving (liquids in ml, treated as grams). " +
+    `Aim for roughly ${slot === "snack" ? "250-400" : "550-800"} kcal per serving with good protein. ` +
+    `Avoid duplicating these dishes: ${existingNames.slice(0, 50).join(", ")}. ` +
+    'Return {"recipes":[{"name": string, "description": string (max 8 words), "ingredients":[{"key": string, "grams": number}], "steps":[string, ...3 to 5 short sentences]}]}.';
+  const out = parseJSON(await callClaude({ system, user, tier: "light", maxTokens: 3000 }));
+  const seen = new Set(existingNames.map((n) => n.toLowerCase()));
+  const slots = slot === "lunch" || slot === "dinner" ? ["lunch", "dinner"] : [slot];
+  const res = [];
+  for (const r of out.recipes || []) {
+    const name = String(r.name || "").trim();
+    const ing = (r.ingredients || [])
+      .filter((x) => FOODS[x.key] && Number(x.grams) >= 5 && Number(x.grams) <= 600)
+      .map((x) => ({ k: x.key, g: Math.round(Number(x.grams)) }));
+    const steps = (r.steps || []).map((s) => String(s).trim()).filter(Boolean).slice(0, 6);
+    if (!name || seen.has(name.toLowerCase()) || ing.length < 2 || steps.length < 2) continue;
+    const m = macrosOf(ing, 1);
+    if (m.kcal < (slot === "snack" ? 150 : 350) || m.kcal > 1100) continue;
+    seen.add(name.toLowerCase());
+    res.push({ id: "u-" + uid(), name, slots, desc: String(r.description || "").trim().slice(0, 80), ing, steps, src: "ai" });
+  }
+  return res;
+}
+
+/* ─────────────────────────────  Fit: small UI pieces  ─────────────────────────────── */
+
+function Ring({ value, max, size = 124, stroke = 11, color = "#047857", children }) {
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  const pct = Math.max(0, Math.min(1, max ? value / max : 0));
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#e7e5e4" strokeWidth={stroke} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} style={{ transition: "stroke-dashoffset .5s ease" }} />
+      </svg>
+      <div className="absolute inset-0 grid place-items-center text-center">{children}</div>
+    </div>
+  );
+}
+
+function MacroBar({ label, value, max, color }) {
+  const pct = Math.max(0, Math.min(100, max ? (value / max) * 100 : 0));
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-[11px]">
+        <span className="font-bold text-stone-500 uppercase tracking-wide">{label}</span>
+        <span className="tabular-nums text-stone-500"><b className="text-stone-800">{Math.round(value)}</b> / {Math.round(max)} g</span>
+      </div>
+      <div className="mt-1 h-2 rounded-full bg-stone-200 overflow-hidden">
+        <div className="h-full rounded-full transition-all" style={{ width: pct + "%", background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function Stepper({ label, value, onChange, min = 0.5, max = 8, step = 0.5 }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm font-semibold text-stone-600">{label}</span>
+      <div className="flex items-center gap-1">
+        <button onClick={() => onChange(Math.max(min, round1(value - step)))} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 active:scale-95"><Minus size={15} /></button>
+        <span className="w-10 text-center font-bold tabular-nums">{value}</span>
+        <button onClick={() => onChange(Math.min(max, round1(value + step)))} className="h-8 w-8 grid place-items-center rounded-lg bg-stone-100 text-stone-600 active:scale-95"><Plus size={15} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────  Today  ─────────────────────────────── */
+
+function SlotCard({ slot, entries, opts, target, pindex }) {
+  const { today, fit, cookMeal, skipMeal, lockMeal, unlockMeal, removeEntry, openLog, addAiRecipes } = useApp();
+  const meta = SLOT_META[slot];
+  const [selRid, setSelRid] = useState(null);
+  const [sv, setSv] = useState({});
+  const [steps, setSteps] = useState(false);
+  const [extra, setExtra] = useState(null); // { cook, eat } while the "cooked extra" sheet is open
+  const [busy, setBusy] = useState(false);
+
+  if (entries.length) {
+    return (
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+        <div className="flex items-center justify-between">
+          <p className="font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>{meta.emoji} {meta.label}</p>
+          <span className="text-xs font-bold text-emerald-700 bg-emerald-50 rounded-full px-2 py-0.5 flex items-center gap-1"><Check size={12} /> Done</span>
+        </div>
+        <div className="mt-2 divide-y divide-stone-100">
+          {entries.map((e) => (
+            <div key={e.id} className="py-2 flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold text-stone-800 truncate">{e.name}{e.servings ? <span className="text-stone-400 font-normal"> · {e.servings} srv</span> : null}</p>
+                <p className="text-xs text-stone-400">{e.source === "skipped" ? "Skipped" : `${e.kcal} kcal · P ${round1(e.p)} · C ${round1(e.c)} · F ${round1(e.f)}`}</p>
+              </div>
+              <button onClick={() => removeEntry(e.id)} aria-label="Remove" className="h-8 w-8 grid place-items-center rounded-lg text-stone-300 hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+        <Btn variant="soft" size="sm" className="mt-2" onClick={() => openLog(slot)}><Plus size={14} /> Add more</Btn>
+      </div>
+    );
+  }
+
+  if (!opts.length) {
+    return (
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-6 text-center">
+        <p className="font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>{meta.emoji} {meta.label}</p>
+        <p className="text-sm text-stone-500 mt-1">No ideas for this slot yet.</p>
+        {aiReady() && <Btn variant="ai" size="sm" className="mt-3" onClick={() => addAiRecipes(slot)}><Sparkles size={14} /> Find ideas</Btn>}
+      </div>
+    );
+  }
+
+  const idx = Math.max(0, opts.findIndex((o) => o.recipe.id === selRid));
+  const opt = opts[idx];
+  const r = opt.recipe;
+  const servings = sv[r.id] != null ? sv[r.id] : opt.servings;
+  const m = macrosOf(r.ing, servings);
+  const need = recipeNeeds(r, servings);
+  const rows = r.ing.map(({ k }) => {
+    const have = (pindex[k] && pindex[k].grams) || 0;
+    return { k, n: need[k], short: Math.max(0, need[k] - have) };
+  });
+  const missing = rows.filter((x) => x.short > 2);
+  const lk = fit.plan[today] && fit.plan[today][slot];
+  const planned = !!(lk && !lk.status && lk.rid === r.id);
+  const go = (d) => setSelRid(opts[(idx + d + opts.length) % opts.length].recipe.id);
+  const setServ = (d) => setSv((s) => ({ ...s, [r.id]: Math.max(0.5, Math.min(4, round1(servings + d))) }));
+  const more = async () => { setBusy(true); try { await addAiRecipes(slot); } finally { setBusy(false); } };
+
+  return (
+    <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+      <div className="flex items-center justify-between">
+        <p className="font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>{meta.emoji} {meta.label}</p>
+        <div className="flex items-center gap-1 text-stone-400">
+          <button onClick={() => go(-1)} aria-label="Previous idea" className="h-8 w-8 grid place-items-center rounded-full hover:bg-stone-100"><ChevronLeft size={18} /></button>
+          <span className="text-xs font-semibold tabular-nums">{idx + 1}/{opts.length}</span>
+          <button onClick={() => go(1)} aria-label="Next idea" className="h-8 w-8 grid place-items-center rounded-full hover:bg-stone-100"><ChevronRight size={18} /></button>
+        </div>
+      </div>
+      <p className="text-[11px] text-stone-400">Aim ≈ {Math.round(target.kcal)} kcal · {Math.round(target.protein)} g protein</p>
+
+      <div className="mt-2">
+        <p className="text-lg font-extrabold text-stone-800 leading-snug" style={{ fontFamily: HEAD }}>
+          {r.name}{planned && <span className="ml-2 align-middle text-[10px] font-bold text-amber-700 bg-amber-100 rounded px-1.5 py-0.5">PLANNED</span>}
+        </p>
+        <p className="text-sm text-stone-500">{r.desc}</p>
+      </div>
+
+      <div className="mt-3 grid grid-cols-4 gap-2 text-center">
+        {[["kcal", m.kcal, "text-stone-800"], ["Protein", m.p + " g", "text-emerald-700"], ["Carbs", m.c + " g", "text-amber-600"], ["Fat", m.f + " g", "text-sky-600"]].map(([l, v, cls]) => (
+          <div key={l} className="rounded-xl bg-stone-50 py-2">
+            <p className={`font-bold tabular-nums ${cls}`}>{v}</p>
+            <p className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">{l}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3"><Stepper label="Servings" value={servings} onChange={(v) => setSv((s) => ({ ...s, [r.id]: v }))} max={4} /></div>
+
+      <div className="mt-3 rounded-2xl bg-stone-50 divide-y divide-stone-100">
+        {rows.map((x) => (
+          <div key={x.k} className="flex items-center justify-between px-3 py-1.5 text-sm">
+            <span className="text-stone-700">{FOODS[x.k].name}</span>
+            <span className="flex items-center gap-2 tabular-nums">
+              <span className="font-semibold text-stone-800">{fmtAmount(x.k, x.n)}</span>
+              {x.short > 2 ? <span className="text-[11px] font-bold text-rose-600">need {fmtAmount(x.k, x.short)}</span> : <Check size={14} className="text-emerald-600" />}
+            </span>
+          </div>
+        ))}
+      </div>
+      {missing.length > 0 && <p className="mt-1.5 text-xs text-rose-600">Short on {missing.length} item{missing.length > 1 ? "s" : ""}. Plan this meal and they go on your Shop list.</p>}
+
+      <button onClick={() => setSteps(!steps)} className="mt-2 text-sm font-semibold text-emerald-700 flex items-center gap-1"><BookOpen size={14} /> {steps ? "Hide steps" : "How to cook"}</button>
+      {steps && <ol className="mt-1 space-y-1.5 text-sm text-stone-600 list-decimal pl-5">{r.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>}
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <Btn onClick={() => { cookMeal({ slot, rid: r.id, cook: servings, eat: servings }); setSelRid(null); }}><Check size={16} /> Cooked it</Btn>
+        <Btn variant="outline" onClick={() => openLog(slot)}><Camera size={16} /> Ate something else</Btn>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm font-semibold">
+        <button onClick={() => (planned ? unlockMeal(today, slot) : lockMeal(today, slot, r.id, servings))} className="text-amber-700 flex items-center gap-1">
+          <Pin size={14} /> {planned ? "Unplan" : "Plan this"}
+        </button>
+        <button onClick={() => setExtra({ cook: round1(servings + 1), eat: servings })} className="text-stone-500">Cooked extra…</button>
+        <button onClick={() => skipMeal(slot)} className="text-stone-500">Skip meal</button>
+        {aiReady() && <button onClick={more} disabled={busy} className="text-stone-500 flex items-center gap-1">{busy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />} More ideas</button>}
+      </div>
+
+      <Sheet open={!!extra} onClose={() => setExtra(null)} title="Cooked extra?"
+        footer={<Btn className="w-full" onClick={() => { cookMeal({ slot, rid: r.id, cook: extra.cook, eat: extra.eat }); setExtra(null); setSelRid(null); }}><Check size={16} /> Confirm</Btn>}>
+        {extra && (
+          <>
+            <p className="text-sm text-stone-500">The pantry is reduced for everything you cook. Only what you eat now counts toward today — the rest is saved as a leftover.</p>
+            <Stepper label="Servings cooked" value={extra.cook} max={8} onChange={(v) => setExtra({ cook: v, eat: Math.min(extra.eat, v) })} />
+            <Stepper label="Servings eaten now" value={extra.eat} max={extra.cook} onChange={(v) => setExtra({ ...extra, eat: Math.min(v, extra.cook) })} />
+          </>
+        )}
+      </Sheet>
+    </div>
+  );
+}
+
+function TodayTab({ openLog, openTargets }) {
+  const { today, fit, pantry, recipes, byId, addWater, eatLeftover, planNextWeek, setTab } = useApp();
+  const t = fit.targets;
+  const visibleSlots = fit.prefs.snack ? SLOTS : SLOTS.filter((s) => s !== "snack");
+  const logsToday = fit.logs[today] || [];
+  const eaten = sumEntries(logsToday);
+  const doneSlots = new Set(logsToday.map((e) => e.slot));
+  const openSlots = visibleSlots.filter((s) => !doneSlots.has(s));
+  const stg = slotTargets({ targets: t, eaten, openSlots });
+  const pindex = indexPantry(pantry, today);
+  const planToday = fit.plan[today] || {};
+
+  const recent = new Set();
+  for (let i = 1; i <= 2; i++) (fit.logs[addDaysISO(today, -i)] || []).forEach((e) => e.rid && recent.add(e.rid));
+  const used = new Set(logsToday.map((e) => e.rid).filter(Boolean));
+  const optsBySlot = {};
+  for (const slot of openSlots) {
+    let opts = rankRecipes({ recipes, slot, target: stg[slot], pindex, dayKey: today, avoid: new Set(used), recent, limit: 5 });
+    const lk = planToday[slot];
+    if (lk && !lk.status && byId[lk.rid]) {
+      const r = byId[lk.rid];
+      opts = [{ recipe: r, servings: lk.servings }, ...opts.filter((o) => o.recipe.id !== r.id)];
+    }
+    optsBySlot[slot] = opts;
+    if (opts[0]) used.add(opts[0].recipe.id);
+  }
+
+  const scroller = useRef(null);
+  const [active, setActive] = useState(0);
+  useEffect(() => {
+    const i = Math.max(0, visibleSlots.indexOf(guessSlot()));
+    const el = scroller.current;
+    if (el && i > 0) el.scrollTo({ left: i * el.clientWidth, behavior: "auto" });
+    setActive(i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const onScroll = (e) => {
+    const el = e.currentTarget;
+    const i = Math.round(el.scrollLeft / Math.max(1, el.clientWidth));
+    setActive((a) => (a === i ? a : i));
+  };
+  const goTo = (i) => { const el = scroller.current; if (el) el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" }); };
+
+  const left = Math.max(0, t.kcal - eaten.kcal);
+  const over = eaten.kcal > t.kcal * 1.05;
+  const wml = fit.water[today] || 0;
+
+  return (
+    <div className="px-4 pt-3 pb-4 space-y-3">
+      <div className="flex items-end justify-between">
+        <div>
+          <p className="text-xs font-semibold text-stone-400">{fmtLong(today)}</p>
+          <h1 className="text-2xl font-extrabold text-stone-800 -mt-0.5" style={{ fontFamily: HEAD }}>Today</h1>
+        </div>
+        <Btn variant="outline" size="sm" onClick={openTargets}><Target size={14} /> Targets</Btn>
+      </div>
+
+      {!t.set && (
+        <button onClick={openTargets} className="w-full text-left rounded-2xl bg-amber-50 ring-1 ring-amber-200 p-3 flex items-center gap-3">
+          <div className="h-9 w-9 rounded-xl bg-amber-500 text-white grid place-items-center"><Target size={18} /></div>
+          <div className="flex-1"><p className="font-bold text-amber-900 text-sm">Set your plan</p><p className="text-xs text-amber-800">Check your height, weight and pace so the daily numbers fit you.</p></div>
+          <ChevronRight size={18} className="text-amber-700" />
+        </button>
+      )}
+
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4 flex items-center gap-4">
+        <Ring value={eaten.kcal} max={t.kcal} color={over ? "#e11d48" : "#047857"}>
+          <div>
+            <p className="text-2xl font-extrabold text-stone-800 tabular-nums leading-none" style={{ fontFamily: HEAD }}>{over ? Math.round(eaten.kcal - t.kcal) : Math.round(left)}</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-stone-400 mt-1">{over ? "kcal over" : "kcal left"}</p>
+          </div>
+        </Ring>
+        <div className="flex-1 space-y-2.5 min-w-0">
+          <MacroBar label="Protein" value={eaten.p} max={t.protein} color="#047857" />
+          <MacroBar label="Carbs" value={eaten.c} max={t.carbs} color="#d97706" />
+          <MacroBar label="Fat" value={eaten.f} max={t.fat} color="#0284c7" />
+          <p className="text-[11px] text-stone-400 tabular-nums">{Math.round(eaten.kcal)} of {t.kcal} kcal eaten</p>
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white ring-1 ring-stone-200 p-3 flex items-center gap-3">
+        <div className="h-10 w-10 rounded-xl bg-sky-50 text-sky-600 grid place-items-center shrink-0"><Droplet size={20} /></div>
+        <div className="flex-1 min-w-0">
+          <p className="font-bold text-stone-800 tabular-nums">{wml} <span className="text-xs text-stone-400 font-medium">/ {t.water} ml</span></p>
+          <div className="mt-1 h-1.5 rounded-full bg-stone-200 overflow-hidden"><div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: Math.min(100, (wml / Math.max(1, t.water)) * 100) + "%" }} /></div>
+        </div>
+        <button onClick={() => addWater(-250)} aria-label="Less water" className="h-9 w-9 grid place-items-center rounded-lg bg-stone-100 text-stone-600 active:scale-95"><Minus size={16} /></button>
+        <button onClick={() => addWater(250)} className="h-9 px-3 rounded-lg bg-sky-600 text-white text-sm font-bold active:scale-95">+250</button>
+      </div>
+
+      <Btn variant="ai" className="w-full" onClick={() => openLog("")}><Camera size={18} /> Log what I ate</Btn>
+
+      {openSlots.length === 0 && <p className="text-center text-sm font-semibold text-emerald-700">Every meal for today is logged. 🎉</p>}
+      {openSlots.length > 0 && left < 120 && <p className="text-center text-xs font-semibold text-emerald-700">Calories for today are covered — only log what you actually eat.</p>}
+
+      <div className="flex gap-2 overflow-x-auto pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {visibleSlots.map((s, i) => (
+          <button key={s} onClick={() => goTo(i)}
+            className={`shrink-0 px-3 h-9 rounded-full text-sm font-bold flex items-center gap-1 transition ${active === i ? "bg-emerald-700 text-white" : "bg-white ring-1 ring-stone-200 text-stone-600"}`}>
+            {SLOT_META[s].emoji} {SLOT_META[s].label}{doneSlots.has(s) && <Check size={13} />}
+          </button>
+        ))}
+      </div>
+
+      <div ref={scroller} onScroll={onScroll} className="flex overflow-x-auto snap-x snap-mandatory scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {visibleSlots.map((slot) => (
+          <div key={slot} className="w-full shrink-0 snap-center px-0.5">
+            <SlotCard slot={slot} entries={logsToday.filter((e) => e.slot === slot)} opts={optsBySlot[slot] || []} target={stg[slot] || { kcal: 0, protein: 0 }} pindex={pindex} />
+          </div>
+        ))}
+      </div>
+      <p className="text-center text-[11px] text-stone-400 -mt-1">Swipe sideways for the next meal · use ‹ › on a card for other ideas</p>
+
+      {fit.leftovers.length > 0 && (
+        <div>
+          <SectionTitle>Leftovers</SectionTitle>
+          <div className="space-y-2">
+            {fit.leftovers.map((l) => (
+              <div key={l.id} className="rounded-2xl bg-white ring-1 ring-stone-200 p-3 flex items-center gap-3">
+                <div className="min-w-0 flex-1"><p className="font-bold text-stone-800 truncate">{l.name}</p><p className="text-xs text-stone-400">{l.servings} serving{l.servings === 1 ? "" : "s"} left · cooked {fmtShort(l.date)}</p></div>
+                <Btn size="sm" variant="soft" onClick={() => eatLeftover(l)}>Eat {l.servings >= 1 ? "1" : "rest"}</Btn>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <Btn variant="soft" className="w-full" onClick={() => { planNextWeek(); setTab("shopping"); }}><CalendarDays size={16} /> Plan my week &amp; build the shopping list</Btn>
+      <p className="text-center text-[11px] text-stone-400">Salt, spices, ginger, garlic, chilies and herbs are assumed to always be in stock.</p>
+    </div>
+  );
+}
+
+/* ─────────────────────────────  Log sheet (photo / text / manual)  ─────────────────────────────── */
+
+function LogSheet({ open, slot0, onClose }) {
+  const { today, fit, logEntries, rememberDishes, notify, openSettings } = useApp();
+  const { node, pick } = usePhoto();
+  const [step, setStep] = useState("input");
+  const [images, setImages] = useState([]);
+  const [note, setNote] = useState("");
+  const [items, setItems] = useState([]);
+  const [slot, setSlot] = useState(slot0 || guessSlot());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    setStep("input"); setImages([]); setNote(""); setItems([]); setErr(""); setBusy(false);
+    setSlot(slot0 || guessSlot());
+  }, [open, slot0]);
+
+  const addPhotos = async () => { const got = await pick(); if (got.length) setImages((a) => [...a, ...got].slice(0, 8)); };
+  const hasAI = aiReady();
+
+  const estimate = async () => {
+    setErr(""); setBusy(true);
+    try {
+      const res = await estimateMeal({ images, note });
+      if (!res.length) throw new Error("Couldn't spot any food. Try a clearer photo or describe it.");
+      setItems(res.map((it) => {
+        const mem = fit.dishMemory[norm(it.name)];
+        return { ...it, id: uid(), scale: mem ? mem.scale : 1, remembered: !!mem };
+      }));
+      setStep("review");
+    } catch (e) { setErr(e.message || "Couldn't analyse that."); }
+    finally { setBusy(false); }
+  };
+
+  const startManual = () => { setItems([{ id: uid(), name: "", grams: 0, kcal: 0, p: 0, c: 0, f: 0, scale: 1, manual: true }]); setStep("review"); };
+  const patch = (id, ch) => setItems((a) => a.map((x) => (x.id === id ? { ...x, ...ch } : x)));
+  const sc = (it) => it.scale || 1;
+  const shown = items.map((it) => ({ ...it, kcal: Math.round(it.kcal * sc(it)), p: round1(it.p * sc(it)), c: round1(it.c * sc(it)), f: round1(it.f * sc(it)), g: Math.round((it.grams || 0) * sc(it)) }));
+  const tot = sumEntries(shown);
+
+  const save = () => {
+    const ok = shown.filter((it) => it.name.trim() && it.kcal > 0);
+    if (!ok.length) { setErr("Add at least one item with a name and calories."); return; }
+    logEntries(ok.map((it) => ({
+      id: uid(), date: today, slot, name: it.name.trim(), kcal: it.kcal, p: it.p, c: it.c, f: it.f, g: it.g,
+      source: it.manual ? "manual" : "photo",
+    })));
+    rememberDishes(items.filter((it) => !it.manual && it.name.trim()));
+    notify(`Logged ${ok.length} item${ok.length > 1 ? "s" : ""} · ${Math.round(tot.kcal)} kcal`);
+    onClose();
+  };
+
+  return (
+    <>
+      {node}
+      <Sheet open={open} onClose={onClose} title={step === "input" ? "Log a meal" : "Check the portions"}
+        footer={step === "review"
+          ? <Btn className="w-full" onClick={save}><Check size={16} /> Log {Math.round(tot.kcal)} kcal</Btn>
+          : null}>
+        <div className="flex gap-1.5 flex-wrap">
+          {SLOTS.map((s) => (
+            <button key={s} onClick={() => setSlot(s)} className={`px-3 h-8 rounded-full text-xs font-bold ${slot === s ? "bg-emerald-700 text-white" : "bg-white ring-1 ring-stone-200 text-stone-600"}`}>{SLOT_META[s].emoji} {SLOT_META[s].label}</button>
+          ))}
+        </div>
+
+        {err && <div className="flex items-start gap-2 rounded-xl bg-rose-50 ring-1 ring-rose-200 px-3 py-2 text-sm text-rose-700"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {err}</div>}
+
+        {step === "input" && (
+          <>
+            {images.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto">
+                {images.map((im, i) => (
+                  <div key={i} className="relative shrink-0">
+                    <img src={`data:${im.mediaType};base64,${im.data}`} alt="" className="h-20 w-20 rounded-xl object-cover ring-1 ring-stone-200" />
+                    <button onClick={() => setImages((a) => a.filter((_, k) => k !== i))} className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-stone-800 text-white grid place-items-center"><X size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <Btn variant="ai" className="w-full" onClick={addPhotos}><Camera size={16} /> {images.length ? "Add another photo" : "Take or choose photos"}</Btn>
+            <Field label="Or describe it" hint="e.g. 2 rotis, paneer bhurji, a bowl of curd">
+              <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="Optional with a photo, required without one"
+                className="w-full px-3 py-2 rounded-xl bg-white ring-1 ring-stone-200 focus:ring-2 focus:ring-emerald-500 outline-none text-[15px] text-stone-800 placeholder:text-stone-400" />
+            </Field>
+            {hasAI
+              ? <Btn className="w-full" onClick={estimate} disabled={busy || (!images.length && !note.trim())}>{busy ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} {busy ? "Estimating…" : "Estimate calories & macros"}</Btn>
+              : <button onClick={openSettings} className="w-full text-left rounded-xl bg-amber-50 ring-1 ring-amber-200 px-3 py-2 text-sm text-amber-800 flex items-center gap-2"><KeyRound size={15} /> Add an AI key in settings to estimate from photos.</button>}
+            <button onClick={startManual} className="w-full text-sm font-semibold text-stone-500 py-1">Enter calories myself</button>
+          </>
+        )}
+
+        {step === "review" && (
+          <>
+            {items.map((it) => {
+              const s = shown.find((x) => x.id === it.id);
+              return (
+                <div key={it.id} className="rounded-2xl bg-white ring-1 ring-stone-200 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <input value={it.name} onChange={(e) => patch(it.id, { name: e.target.value })} placeholder="Food name" className="flex-1 min-w-0 font-bold text-stone-800 bg-transparent outline-none" />
+                    {!it.manual && it.confidence && <ConfBadge c={it.confidence} />}
+                    <button onClick={() => setItems((a) => a.filter((x) => x.id !== it.id))} aria-label="Remove item" className="text-stone-300 hover:text-rose-500"><X size={16} /></button>
+                  </div>
+                  {it.manual ? (
+                    <div className="grid grid-cols-4 gap-2">
+                      {[["kcal", "kcal"], ["p", "Protein"], ["c", "Carbs"], ["f", "Fat"]].map(([k, l]) => (
+                        <label key={k} className="block"><span className="text-[10px] font-semibold uppercase text-stone-400">{l}</span>
+                          <input type="number" min="0" inputMode="decimal" value={it[k] || ""} onChange={(e) => patch(it.id, { [k]: Math.max(0, Number(e.target.value) || 0) })} className="w-full h-9 px-2 rounded-lg bg-stone-50 ring-1 ring-stone-200 text-sm tabular-nums" /></label>
+                      ))}
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-stone-500 tabular-nums">{s.g ? `${s.g} g · ` : ""}<b className="text-stone-800">{s.kcal} kcal</b> · P {s.p} · C {s.c} · F {s.f}</p>
+                      <input type="range" min="0.25" max="2.5" step="0.05" value={sc(it)} onChange={(e) => patch(it.id, { scale: Number(e.target.value) })} className="w-full accent-emerald-700" />
+                      <div className="flex justify-between text-[10px] text-stone-400"><span>¼×</span><span className="font-semibold text-stone-500">{sc(it).toFixed(2)}× of the estimate</span><span>2½×</span></div>
+                      {it.remembered && <p className="text-[11px] text-amber-600">Started from how you corrected this dish before.</p>}
+                    </>
+                  )}
+                </div>
+              );
+            })}
+            <Btn variant="outline" size="sm" onClick={() => setItems((a) => [...a, { id: uid(), name: "", grams: 0, kcal: 0, p: 0, c: 0, f: 0, scale: 1, manual: true }])}><Plus size={14} /> Add an item</Btn>
+            <div className="rounded-xl bg-emerald-50 text-emerald-900 px-3 py-2 text-sm font-semibold tabular-nums">Total {Math.round(tot.kcal)} kcal · P {round1(tot.p)} g · C {round1(tot.c)} g · F {round1(tot.f)} g</div>
+            <p className="text-[11px] text-stone-400">Photo estimates are often 20–30% off. Slide the portion until it looks right — it's remembered for next time.</p>
+          </>
+        )}
+      </Sheet>
+    </>
+  );
+}
+
+/* ─────────────────────────────  Targets sheet  ─────────────────────────────── */
+
+function TargetsSheet({ open, onClose }) {
+  const { fit, saveTargets, setSnack } = useApp();
+  const t = fit.targets;
+  const [p, setP] = useState(t.profile);
+  const [custom, setCustom] = useState(!!t.manual);
+  const [man, setMan] = useState({ kcal: t.kcal, protein: t.protein, fat: t.fat, water: t.water });
+  useEffect(() => {
+    if (!open) return;
+    setP(t.profile); setCustom(!!t.manual);
+    setMan({ kcal: t.kcal, protein: t.protein, fat: t.fat, water: t.water });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const calc = computeTargets(p);
+  const kcal = custom ? Number(man.kcal) || 0 : calc.kcal;
+  const protein = custom ? Number(man.protein) || 0 : calc.protein;
+  const fat = custom ? Number(man.fat) || 0 : calc.fat;
+  const water = custom ? Number(man.water) || 0 : calc.water;
+  const carbs = custom ? Math.max(0, Math.round((kcal - protein * 4 - fat * 9) / 4 / 5) * 5) : calc.carbs;
+  const perKg = (Number(p.weightKg) || 60) > 0 ? protein / (Number(p.weightKg) || 60) : 0;
+  const setField = (k) => (e) => setP((s) => ({ ...s, [k]: e.target.value }));
+
+  const save = () => {
+    const profile = { ...p, age: Number(p.age) || 25, heightCm: Number(p.heightCm) || 170, weightKg: Number(p.weightKg) || 60, pace: Number(p.pace) || 0.5 };
+    saveTargets({ profile, kcal, protein, fat, carbs, water, set: true, manual: custom });
+    onClose();
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} title="Your daily targets"
+      footer={<Btn className="w-full" onClick={save}><Check size={16} /> Save targets</Btn>}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Sex"><Select value={p.sex} onChange={setField("sex")}><option value="male">Male</option><option value="female">Female</option></Select></Field>
+        <Field label="Age"><TextInput type="number" inputMode="numeric" value={p.age} onChange={setField("age")} /></Field>
+        <Field label="Height (cm)"><TextInput type="number" inputMode="numeric" value={p.heightCm} onChange={setField("heightCm")} /></Field>
+        <Field label="Weight (kg)"><TextInput type="number" inputMode="decimal" value={p.weightKg} onChange={setField("weightKg")} /></Field>
+        <Field label="Activity"><Select value={p.activity} onChange={setField("activity")}><option value="sedentary">Sedentary</option><option value="light">Lightly active</option><option value="moderate">Moderately active</option><option value="active">Very active</option></Select></Field>
+        <Field label="Goal"><Select value={p.goal} onChange={setField("goal")}><option value="gain">Gain weight</option><option value="maintain">Maintain</option><option value="lose">Lose weight</option></Select></Field>
+      </div>
+      {p.goal !== "maintain" && (
+        <Field label="Pace" hint="Lean gain is usually 0.25–0.5 kg a week; faster mostly adds fat.">
+          <Select value={String(p.pace)} onChange={setField("pace")}><option value="0.25">Slow · 0.25 kg / week</option><option value="0.5">Optimal · 0.5 kg / week</option><option value="0.75">Fast · 0.75 kg / week</option></Select>
+        </Field>
+      )}
+
+      <div className="rounded-2xl bg-white ring-1 ring-stone-200 p-3">
+        <div className="grid grid-cols-4 gap-2 text-center">
+          {[["kcal", kcal], ["Protein", protein + " g"], ["Carbs", carbs + " g"], ["Fat", fat + " g"]].map(([l, v]) => (
+            <div key={l}><p className="font-extrabold text-stone-800 tabular-nums" style={{ fontFamily: HEAD }}>{v}</p><p className="text-[10px] uppercase tracking-wide text-stone-400 font-semibold">{l}</p></div>
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-stone-500">Protein is {perKg.toFixed(1)} g per kg of body weight · water {water} ml</p>
+        {perKg > 2.6 && <p className="mt-1 text-xs font-semibold text-amber-700">That's above the usual 1.6–2.2 g/kg range, and expensive to hit with food.</p>}
+      </div>
+
+      <label className="flex items-center justify-between gap-3 text-sm font-semibold text-stone-700">
+        Set the numbers myself
+        <input type="checkbox" checked={custom} onChange={(e) => setCustom(e.target.checked)} className="h-5 w-5 accent-emerald-700" />
+      </label>
+      {custom && (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Calories"><TextInput type="number" inputMode="numeric" value={man.kcal} onChange={(e) => setMan({ ...man, kcal: e.target.value })} /></Field>
+          <Field label="Protein (g)"><TextInput type="number" inputMode="numeric" value={man.protein} onChange={(e) => setMan({ ...man, protein: e.target.value })} /></Field>
+          <Field label="Fat (g)"><TextInput type="number" inputMode="numeric" value={man.fat} onChange={(e) => setMan({ ...man, fat: e.target.value })} /></Field>
+          <Field label="Water (ml)"><TextInput type="number" inputMode="numeric" value={man.water} onChange={(e) => setMan({ ...man, water: e.target.value })} /></Field>
+        </div>
+      )}
+
+      <label className="flex items-center justify-between gap-3 text-sm font-semibold text-stone-700">
+        Show a snack card each day
+        <input type="checkbox" checked={!!fit.prefs.snack} onChange={(e) => setSnack(e.target.checked)} className="h-5 w-5 accent-emerald-700" />
+      </label>
+    </Sheet>
+  );
+}
+
+/* ─────────────────────────────  Insights  ─────────────────────────────── */
+
+function WeightSpark({ points }) {
+  if (points.length < 2) return <p className="text-sm text-stone-400">Log your weight a couple of times to see the trend.</p>;
+  const W = 300, H = 64, pad = 6;
+  const ys = points.map((x) => x.kg);
+  const lo = Math.min(...ys), hi = Math.max(...ys), span = Math.max(0.5, hi - lo);
+  const pts = points.map((x, i) => `${pad + (i * (W - 2 * pad)) / (points.length - 1)},${H - pad - ((x.kg - lo) / span) * (H - 2 * pad)}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-16">
+      <polyline points={pts} fill="none" stroke="#047857" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function InsightsTab() {
+  const { today, fit, addWeight, setTab } = useApp();
+  const t = fit.targets;
+  const [kg, setKg] = useState("");
+  const days = Array.from({ length: 7 }, (_, i) => addDaysISO(today, i - 6));
+  const rows = days.map((d) => {
+    const es = fit.logs[d] || [];
+    return { d, ...sumEntries(es), n: es.filter((e) => e.source !== "skipped").length, water: fit.water[d] || 0 };
+  });
+  const logged = rows.filter((r) => r.n > 0);
+  const avg = (k) => (logged.length ? logged.reduce((a, r) => a + r[k], 0) / logged.length : 0);
+  const maxBar = Math.max(t.kcal * 1.15, ...rows.map((r) => r.kcal), 1);
+  const waterDays = rows.filter((r) => r.water >= t.water * 0.9).length;
+  const weights = [...(fit.weights || [])].sort((a, b) => a.date.localeCompare(b.date));
+  const lastW = weights[weights.length - 1];
+  const dayLetter = (d) => toDate(d).toLocaleDateString(undefined, { weekday: "narrow" });
+
+  return (
+    <div className="px-4 pt-3 pb-4 space-y-3">
+      <h1 className="text-2xl font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>Insights</h1>
+
+      {logged.length === 0 ? (
+        <Empty icon={TrendingUp} title="No meals logged this week" sub="Log a meal on the Today tab and your weekly numbers will show up here."
+          action={<Btn onClick={() => setTab("today")}><Camera size={16} /> Go to Today</Btn>} />
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-2">
+            {[["Avg kcal", Math.round(avg("kcal")), `of ${t.kcal}`], ["Avg protein", Math.round(avg("p")) + " g", `of ${t.protein} g`], ["Days logged", logged.length + "/7", `water ${waterDays}/7`]].map(([l, v, s]) => (
+              <div key={l} className="rounded-2xl bg-white ring-1 ring-stone-200 p-3 text-center">
+                <p className="text-lg font-bold text-stone-800 tabular-nums" style={{ fontFamily: HEAD }}>{v}</p>
+                <p className="text-[10px] text-stone-400 font-semibold uppercase tracking-wide">{l}</p>
+                <p className="text-[10px] text-stone-400">{s}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+            <p className="text-[13px] font-bold uppercase tracking-wider text-stone-500">Calories this week</p>
+            <div className="relative mt-3 h-36">
+              <div className="absolute inset-x-0 border-t border-dashed border-emerald-500/70" style={{ bottom: (t.kcal / maxBar) * 100 + "%" }}>
+                <span className="absolute -top-4 right-0 text-[10px] font-bold text-emerald-700">target {t.kcal}</span>
+              </div>
+              <div className="absolute inset-0 flex items-end gap-2">
+                {rows.map((r) => (
+                  <div key={r.d} className="flex-1 h-full flex flex-col justify-end items-center">
+                    <div className={`w-full rounded-t-lg ${r.n === 0 ? "bg-stone-100" : r.kcal > t.kcal * 1.05 ? "bg-rose-400" : "bg-emerald-500"}`} style={{ height: Math.max(r.n ? 4 : 2, (r.kcal / maxBar) * 100) + "%" }} />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex gap-2 mt-1">
+              {rows.map((r) => <div key={r.d} className={`flex-1 text-center text-[11px] font-semibold ${r.d === today ? "text-emerald-700" : "text-stone-400"}`}>{dayLetter(r.d)}</div>)}
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+        <div className="flex items-center justify-between">
+          <p className="text-[13px] font-bold uppercase tracking-wider text-stone-500">Weight</p>
+          {lastW && <p className="text-sm font-bold text-stone-800 tabular-nums">{lastW.kg} kg <span className="text-xs text-stone-400 font-medium">· {fmtShort(lastW.date)}</span></p>}
+        </div>
+        <div className="mt-2"><WeightSpark points={weights.slice(-12)} /></div>
+        <div className="mt-2 flex gap-2">
+          <input type="number" inputMode="decimal" step="0.1" min="20" max="300" value={kg} onChange={(e) => setKg(e.target.value)} placeholder="Today's weight (kg)" className={inputCls} />
+          <Btn onClick={() => { const v = Number(kg); if (v >= 20 && v <= 300) { addWeight(round1(v)); setKg(""); } }} disabled={!(Number(kg) >= 20)}>Log</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────  Plan + shopping list (lives in the Shop tab)  ─────────────────────────────── */
+
+function PlanShopping() {
+  const { fit, today, pantry, byId, planNextWeek, clearPlan, removePlanned, addOrMerge, withUndo, notify } = useApp();
+  const [showPlan, setShowPlan] = useState(false);
+  const needs = shoppingNeeds({ plan: fit.plan, byId, pantry, fromDate: today });
+  const days = Object.keys(fit.plan).filter((d) => d >= today && Object.values(fit.plan[d]).some((e) => !e.status)).sort();
+  const cats = [...new Set(needs.map((n) => n.cat))];
+
+  const buy = (rows, label) => withUndo(label, () => addOrMerge(rows.map((r) => ({ name: r.name, category: r.cat, quantity: r.buyQty, unit: r.buyUnit }))));
+
+  return (
+    <div className="mb-4">
+      <div className="rounded-3xl bg-white ring-1 ring-stone-200 p-4">
+        <div className="flex items-center justify-between">
+          <p className="font-extrabold text-stone-800" style={{ fontFamily: HEAD }}>This week's plan</p>
+          {days.length > 0 && <button onClick={() => setShowPlan(!showPlan)} className="text-sm font-semibold text-emerald-700">{showPlan ? "Hide" : `View ${days.length} days`}</button>}
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <Btn onClick={planNextWeek}><CalendarDays size={16} /> {days.length ? "Fill the gaps" : "Plan 7 days"}</Btn>
+          <Btn variant="outline" onClick={clearPlan} disabled={!days.length}>Clear plan</Btn>
+        </div>
+        {showPlan && (
+          <div className="mt-3 space-y-2">
+            {days.map((d) => (
+              <div key={d} className="rounded-xl bg-stone-50 p-2">
+                <p className="text-xs font-bold text-stone-500">{fmtLong(d)}</p>
+                {SLOTS.filter((s) => fit.plan[d][s] && !fit.plan[d][s].status && byId[fit.plan[d][s].rid]).map((s) => {
+                  const e = fit.plan[d][s];
+                  return (
+                    <div key={s} className="flex items-center gap-2 text-sm py-0.5">
+                      <span className="w-5 text-center">{SLOT_META[s].emoji}</span>
+                      <span className="flex-1 min-w-0 truncate text-stone-700">{byId[e.rid].name} <span className="text-stone-400">× {e.servings}</span></span>
+                      <button onClick={() => removePlanned(d, s)} aria-label="Remove from plan" className="text-stone-300 hover:text-rose-500"><X size={14} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <SectionTitle right={needs.length > 0 && <button onClick={() => buy(needs, `${needs.length} items added to pantry`)} className="text-xs font-bold text-emerald-700">Mark all bought</button>}>Need to buy</SectionTitle>
+      {needs.length === 0 ? (
+        <div className="rounded-2xl bg-white ring-1 ring-stone-200 p-4 text-center text-sm text-stone-500">
+          {days.length ? "Your pantry covers every planned meal. 🎉" : "Plan your week and the exact shopping list appears here."}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {cats.map((c) => (
+            <div key={c} className="rounded-2xl bg-white ring-1 ring-stone-200 divide-y divide-stone-100 overflow-hidden">
+              <p className="px-3 py-1.5 text-[11px] font-bold uppercase tracking-wide text-stone-400 bg-stone-50">{CAT_EMOJI[c] || "📦"} {c}</p>
+              {needs.filter((n) => n.cat === c).map((n) => (
+                <div key={n.key} className="flex items-center gap-3 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="font-bold text-stone-800 truncate">{n.name}</p>
+                    <p className="text-xs text-stone-400">buy {fmtBuy(n)} · plan needs {fmtAmount(n.key, n.needG)}{n.haveG ? `, you have ${fmtAmount(n.key, n.haveG)}` : ""}</p>
+                  </div>
+                  <Btn size="sm" variant="soft" onClick={() => buy([n], `${n.name} added to pantry`)}><Check size={14} /> Bought</Btn>
+                </div>
+              ))}
+            </div>
+          ))}
+          <p className="text-[11px] text-stone-400">Amounts are rounded up to practical sizes. Spices, salt, ginger, garlic and chilies are not listed.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────  Meals tab wrapper (ideas + scheduled)  ─────────────────────────────── */
+
+function MealsTab() {
+  const [view, setView] = useState("ideas");
+  return (
+    <div>
+      <div className="px-4 pt-2">
+        <div className="grid grid-cols-2 rounded-xl bg-stone-200/70 p-1 text-sm font-bold">
+          {[["ideas", "Ideas"], ["scheduled", "Scheduled"]].map(([id, l]) => (
+            <button key={id} onClick={() => setView(id)} className={`h-9 rounded-lg transition ${view === id ? "bg-white shadow text-emerald-700" : "text-stone-500"}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {view === "ideas" ? <MealIdeas /> : <PlannerTab />}
+    </div>
+  );
+}
+
+
 const TABS = [
-  { id: "inventory", label: "Inventory", icon: Package },
+  { id: "today", label: "Today", icon: Home },
+  { id: "inventory", label: "Pantry", icon: Package },
   { id: "scan", label: "Scan", icon: Camera },
   { id: "meals", label: "Meals", icon: Utensils },
-  { id: "planner", label: "Planner", icon: CalendarDays },
-  { id: "shopping", label: "Shopping", icon: ShoppingCart },
+  { id: "shopping", label: "Shop", icon: ShoppingCart },
+  { id: "insights", label: "Insights", icon: BarChart3 },
 ];
 
 export default function App() {
-  const [tab, setTab] = useState("inventory");
+  const [tab, setTab] = useState("today");
+  const today = useToday();
+  const [fit, setFit] = useState(() => normalizeFit(null));
+  const [logSheet, setLogSheet] = useState(null);   // { slot } while the log sheet is open
+  const [targetsOpen, setTargetsOpen] = useState(false);
+  const [undo, setUndo] = useState(null);           // { label, snap }
+  const undoTimer = useRef(null);
   const [pantry, setPantry] = useState([]);
   const [meals, setMeals] = useState([]);
   const [trips, setTrips] = useState([]);
@@ -1625,7 +2451,7 @@ export default function App() {
   // ── load this user's private data on sign-in ──
   useEffect(() => {
     if (!CONFIGURED) return;
-    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); return; }
+    if (!user) { setLoaded(false); setPantry([]); setMeals([]); setTrips([]); setIdeas([]); setIdeasSig(""); setFit(normalizeFit(null)); return; }
     let alive = true;
     setLoaded(false);
     // Instant hydrate from the local cache first — no network wait, so meal
@@ -1635,7 +2461,7 @@ export default function App() {
     if (cached && cached.ideas && cached.ideas.length) { setIdeas(cached.ideas); setIdeasSig(cached.sig || ""); }
     loadUserData(user.uid).then((d) => {
       if (!alive) return;
-      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips);
+      setPantry(d.pantry); setMeals(d.meals); setTrips(d.trips); setFit(d.fit);
       // Only Firestore overrides the local cache if it actually has ideas —
       // otherwise a not-yet-synced write shouldn't erase what we just restored.
       if (d.ideas && d.ideas.length) { setIdeas(d.ideas); setIdeasSig(d.ideasSig); }
@@ -1648,9 +2474,9 @@ export default function App() {
   useEffect(() => {
     if (!loaded || !user) return;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips, ideas, ideasSig }), 600);
+    saveTimer.current = setTimeout(() => saveUserData(user.uid, { pantry, meals, trips, ideas, ideasSig, fit: pruneFit(fit, today) }), 600);
     return () => clearTimeout(saveTimer.current);
-  }, [pantry, meals, trips, ideas, ideasSig, loaded, user]);
+  }, [pantry, meals, trips, ideas, ideasSig, fit, loaded, user]);
 
   // Mirror ideas to the instant local cache the moment they change — this write
   // is synchronous (no network), so it survives even if the tab gets killed
@@ -1696,7 +2522,7 @@ export default function App() {
   const updateItem = (id, patch) => setPantry((p) => p.map((i) => i.id === id ? { ...i, ...patch, quantity: Number(patch.quantity) || 0 } : i));
   const adjustQty = (id, delta) => setPantry((p) => p.flatMap((i) => {
     if (i.id !== id) return [i];
-    const q = (Number(i.quantity) || 0) + delta;
+    const q = Math.round(((Number(i.quantity) || 0) + delta) * 100) / 100;
     return q <= 0 ? [] : [{ ...i, quantity: q }]; // hits 0 → removed
   }));
   const removeItem = (id) => setPantry((p) => p.filter((i) => i.id !== id));
@@ -1730,7 +2556,116 @@ export default function App() {
   const addTrip = (t) => setTrips((s) => [{ id: uid(), ...t }, ...s]);
   const removeTrip = (id) => setTrips((s) => s.filter((t) => t.id !== id));
 
+  // ── food system: recipes, plan, logs ──
+  const recipes = React.useMemo(() => [...ALL_LIBRARY, ...(fit.userRecipes || []).map(withMacros)], [fit.userRecipes]);
+  const byId = React.useMemo(() => Object.fromEntries(recipes.map((r) => [r.id, r])), [recipes]);
+  const patchFit = (fn) => setFit((f) => fn(f));
+
+  // Snapshot pantry + fit, run the change, and offer a 10-second Undo.
+  const withUndo = (label, fn) => {
+    setUndo({ label, snap: { pantry, fit } });
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), 10000);
+    return fn();
+  };
+  const doUndo = () => {
+    if (!undo) return;
+    setPantry(undo.snap.pantry); setFit(undo.snap.fit);
+    clearTimeout(undoTimer.current); setUndo(null); notify("Undone");
+  };
+
+  const pushLog = (f, entries) => {
+    const logs = { ...f.logs };
+    for (const e of entries) logs[e.date] = [...(logs[e.date] || []), e];
+    return logs;
+  };
+  const logEntries = (entries) => patchFit((f) => ({ ...f, logs: pushLog(f, entries) }));
+  const removeEntry = (id) => withUndo("Entry removed", () => patchFit((f) => ({
+    ...f, logs: { ...f.logs, [today]: (f.logs[today] || []).filter((e) => e.id !== id) },
+  })));
+  const markPlan = (plan, date, slot, status) => {
+    const e = plan[date] && plan[date][slot];
+    return e ? { ...plan, [date]: { ...plan[date], [slot]: { ...e, status } } } : plan;
+  };
+
+  const cookMeal = ({ slot, rid, cook, eat }) => {
+    const r = byId[rid]; if (!r) return;
+    withUndo(`Cooked ${r.name}`, () => {
+      const { pantry: np, short } = deductFromPantry(pantry, recipeNeeds(r, cook));
+      setPantry(np);
+      const m = macrosOf(r.ing, eat);
+      const entry = { id: uid(), date: today, slot, name: r.name, rid, servings: eat, kcal: m.kcal, p: m.p, c: m.c, f: m.f, source: "cooked" };
+      patchFit((f) => ({
+        ...f,
+        logs: pushLog(f, [entry]),
+        plan: markPlan(f.plan, today, slot, "done"),
+        leftovers: cook > eat ? [...f.leftovers, { id: uid(), rid, name: r.name, servings: round1(cook - eat), date: today }] : f.leftovers,
+      }));
+      notify(short.length ? `Cooked · pantry was short on ${short.slice(0, 2).map((s) => s.name.toLowerCase()).join(", ")}` : "Cooked · pantry updated");
+    });
+  };
+  const skipMeal = (slot) => withUndo("Meal skipped", () => patchFit((f) => ({
+    ...f,
+    logs: pushLog(f, [{ id: uid(), date: today, slot, name: "Skipped", kcal: 0, p: 0, c: 0, f: 0, source: "skipped" }]),
+    plan: markPlan(f.plan, today, slot, "skipped"),
+  })));
+  const eatLeftover = (l) => {
+    const r = byId[l.rid]; const eat = l.servings >= 1 ? 1 : l.servings;
+    const m = r ? macrosOf(r.ing, eat) : { kcal: 0, p: 0, c: 0, f: 0 };
+    withUndo("Leftover eaten", () => patchFit((f) => ({
+      ...f,
+      logs: pushLog(f, [{ id: uid(), date: today, slot: guessSlot(), name: l.name + " (leftover)", rid: l.rid, servings: eat, kcal: m.kcal, p: m.p, c: m.c, f: m.f, source: "leftover" }]),
+      leftovers: f.leftovers.flatMap((x) => (x.id !== l.id ? [x] : l.servings - eat > 0.01 ? [{ ...x, servings: round1(l.servings - eat) }] : [])),
+    })));
+  };
+
+  const lockMeal = (date, slot, rid, servings) => patchFit((f) => ({ ...f, plan: { ...f.plan, [date]: { ...(f.plan[date] || {}), [slot]: { rid, servings } } } }));
+  const removePlanned = (date, slot) => patchFit((f) => {
+    const day = { ...(f.plan[date] || {}) }; delete day[slot];
+    const plan = { ...f.plan }; if (Object.keys(day).length) plan[date] = day; else delete plan[date];
+    return { ...f, plan };
+  });
+  const unlockMeal = removePlanned;
+  const clearPlan = () => withUndo("Plan cleared", () => patchFit((f) => ({ ...f, plan: {} })));
+  const planNextWeek = () => withUndo("Week planned", () => {
+    const slots = fit.prefs.snack ? SLOTS : SLOTS.filter((s) => s !== "snack");
+    const existing = JSON.parse(JSON.stringify(fit.plan));
+    // slots already eaten today must not be planned again
+    for (const e of fit.logs[today] || []) existing[today] = { ...(existing[today] || {}), [e.slot]: (existing[today] || {})[e.slot] || { rid: "", servings: 0, status: "done" } };
+    const planned = planWeek({ start: today, days: 7, targets: fit.targets, pantry, recipes, byId, slots, existing, today });
+    for (const d of Object.keys(planned)) for (const s of Object.keys(planned[d])) if (!planned[d][s].rid) delete planned[d][s];
+    patchFit((f) => ({ ...f, plan: { ...f.plan, ...planned } }));
+    notify("Week planned · shopping list updated");
+  });
+
+  const addWater = (ml) => patchFit((f) => ({ ...f, water: { ...f.water, [today]: Math.max(0, (f.water[today] || 0) + ml) } }));
+  const addWeight = (kg) => patchFit((f) => ({ ...f, weights: [...(f.weights || []).filter((w) => w.date !== today), { date: today, kg }] }));
+  const saveTargets = (t) => { patchFit((f) => ({ ...f, targets: { ...f.targets, ...t } })); notify("Targets saved"); };
+  const setSnack = (on) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, snack: on } }));
+  const rememberDishes = (items) => patchFit((f) => {
+    const mem = { ...f.dishMemory };
+    for (const it of items) {
+      const k = norm(it.name); const old = mem[k]; const n = old ? Math.min(old.n, 5) : 0;
+      mem[k] = { scale: Math.round((((old ? old.scale * n : 0) + (it.scale || 1)) / (n + 1)) * 100) / 100, n: n + 1 };
+    }
+    const keys = Object.keys(mem); if (keys.length > 150) for (const k of keys.slice(0, keys.length - 150)) delete mem[k];
+    return { ...f, dishMemory: mem };
+  });
+  const addAiRecipes = async (slot) => {
+    try {
+      const got = await aiRecipes(slot, recipes.map((r) => r.name));
+      if (!got.length) { notify("No new ideas this time. Try again."); return; }
+      patchFit((f) => ({ ...f, userRecipes: [...got, ...(f.userRecipes || [])].slice(0, 40) }));
+      notify(`${got.length} new ideas added`);
+    } catch (e) { notify("Couldn't get ideas: " + (e.message || "AI error").slice(0, 60)); }
+  };
+  const openLog = (slot) => setLogSheet({ slot: slot || "" });
+  const openSettings = () => setShowSettings(true);
+
   const ctx = {
+    today, fit, recipes, byId, setTab, withUndo, logEntries, removeEntry, cookMeal, skipMeal, eatLeftover,
+    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack,
+    rememberDishes, addAiRecipes, openLog, openSettings,
     pantry, meals, trips, ideas, setIdeas, ideasSig, setIdeasSig, notify,
     addItem, updateItem, adjustQty, removeItem, clearPantry, replacePantry, addOrMerge,
     addMeal, removeMeal, toggleFav, scheduleMeal, setMealSteps, setMealServings, addTrip, removeTrip,
@@ -1738,7 +2673,7 @@ export default function App() {
 
   const expiringCount = pantry.filter((i) => i.expiry && daysUntil(i.expiry) <= 3).length;
   const plannedCount = meals.filter((m) => m.scheduledDate && daysUntil(m.scheduledDate) === 0).length;
-  const badges = { inventory: expiringCount, planner: plannedCount };
+  const badges = { inventory: expiringCount, meals: plannedCount };
 
   if (!CONFIGURED) return <ConfigNeeded />;
   if (!authReady) return <div className="min-h-screen grid place-items-center bg-stone-50 text-emerald-700"><Loader2 className="animate-spin" /></div>;
@@ -1770,13 +2705,24 @@ export default function App() {
 
         {/* content */}
         <main className="max-w-md mx-auto">
+          {tab === "today" && <TodayTab openLog={openLog} openTargets={() => setTargetsOpen(true)} />}
           {tab === "inventory" && <InventoryTab />}
           {tab === "scan" && <ScanTab openSettings={() => setShowSettings(true)} />}
           {tab === "meals" && <MealsTab />}
-          {tab === "planner" && <PlannerTab />}
           {tab === "shopping" && <ShoppingTab />}
+          {tab === "insights" && <InsightsTab />}
           <div className="h-24" />
         </main>
+
+        {/* undo */}
+        {undo && (
+          <div className="fixed bottom-36 left-1/2 -translate-x-1/2 z-50 bg-stone-800 text-white text-sm font-semibold pl-4 pr-2 py-2 rounded-full shadow-lg flex items-center gap-3">
+            {undo.label}
+            <button onClick={doUndo} className="px-3 h-8 rounded-full bg-white/15 hover:bg-white/25 font-bold flex items-center gap-1"><RotateCcw size={13} /> Undo</button>
+          </div>
+        )}
+        <LogSheet open={!!logSheet} slot0={logSheet ? logSheet.slot : ""} onClose={() => setLogSheet(null)} />
+        <TargetsSheet open={targetsOpen} onClose={() => setTargetsOpen(false)} />
 
         {/* toast */}
         {toast && (
@@ -1792,7 +2738,7 @@ export default function App() {
 
         {/* bottom nav */}
         <nav className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-t border-stone-200">
-          <div className="max-w-md mx-auto grid grid-cols-5">
+          <div className="max-w-md mx-auto grid grid-cols-6">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setTab(id)}
                 className={`relative py-2.5 flex flex-col items-center gap-0.5 transition ${tab === id ? "text-emerald-700" : "text-stone-400"}`}>
