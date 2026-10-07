@@ -1767,7 +1767,7 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
             <div key={e.id} className="py-2 flex items-center gap-2">
               <div className="min-w-0 flex-1">
                 <p className="font-semibold text-stone-800 truncate">{e.name}{e.servings ? <span className="text-stone-400 font-normal"> · {e.servings} srv</span> : null}</p>
-                <p className="text-xs text-stone-400">{e.source === "skipped" ? "Skipped" : `${e.kcal} kcal · P ${round1(e.p)} · C ${round1(e.c)} · F ${round1(e.f)}`}</p>
+                <p className="text-xs text-stone-400">{e.source === "skipped" ? "Nothing counted for this meal" : `${e.kcal} kcal · P ${round1(e.p)} · C ${round1(e.c)} · F ${round1(e.f)}`}</p>
               </div>
               <button onClick={() => removeEntry(e.id)} aria-label="Remove" className="h-8 w-8 grid place-items-center rounded-lg text-stone-300 hover:bg-rose-50 hover:text-rose-600"><Trash2 size={14} /></button>
             </div>
@@ -1853,7 +1853,7 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
 
       <div className="mt-4 grid grid-cols-2 gap-2">
         <Btn onClick={() => { cookMeal({ slot, rid: r.id, cook: servings, eat: servings }); setSelRid(null); }}><Check size={16} /> Cooked it</Btn>
-        <Btn variant="outline" onClick={() => openLog(slot)}><Camera size={16} /> Ate something else</Btn>
+        <Btn variant="outline" className="whitespace-nowrap" onClick={() => openLog(slot)}><Camera size={16} className="shrink-0" /> Something else</Btn>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm font-semibold">
         <button onClick={() => (planned ? unlockMeal(today, slot) : lockMeal(today, slot, r.id, servings))} className="text-amber-700 flex items-center gap-1">
@@ -1920,6 +1920,18 @@ function TodayTab({ openLog, openTargets }) {
     setActive((a) => (a === i ? a : i));
   };
   const goTo = (i) => { const el = scroller.current; if (el) el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" }); };
+  // The row would otherwise be as tall as its tallest card; track the visible card's height instead.
+  const slides = useRef([]);
+  const [slideH, setSlideH] = useState(null);
+  useEffect(() => {
+    const el = slides.current[active];
+    if (!el) return;
+    const upd = () => setSlideH(el.offsetHeight);
+    upd();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(upd); ro.observe(el);
+    return () => ro.disconnect();
+  }, [active, visibleSlots.length]);
 
   const left = Math.max(0, t.kcal - eaten.kcal);
   const over = eaten.kcal > t.kcal * 1.05;
@@ -1973,18 +1985,19 @@ function TodayTab({ openLog, openTargets }) {
       {openSlots.length === 0 && <p className="text-center text-sm font-semibold text-emerald-700">Every meal for today is logged. 🎉</p>}
       {openSlots.length > 0 && left < 120 && <p className="text-center text-xs font-semibold text-emerald-700">Calories for today are covered — only log what you actually eat.</p>}
 
-      <div className="flex gap-2 overflow-x-auto pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      <div className="flex gap-1.5 overflow-x-auto pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {visibleSlots.map((s, i) => (
           <button key={s} onClick={() => goTo(i)}
-            className={`shrink-0 px-3 h-9 rounded-full text-sm font-bold flex items-center gap-1 transition ${active === i ? "bg-emerald-700 text-white" : "bg-white ring-1 ring-stone-200 text-stone-600"}`}>
-            {SLOT_META[s].emoji} {SLOT_META[s].label}{doneSlots.has(s) && <Check size={13} />}
+            className={`shrink-0 px-2.5 h-9 rounded-full text-[13px] font-bold flex items-center gap-1 transition ${active === i ? "bg-emerald-700 text-white" : "bg-white ring-1 ring-stone-200 text-stone-600"}`}>
+            {doneSlots.has(s) ? <Check size={14} /> : SLOT_META[s].emoji} {SLOT_META[s].label}
           </button>
         ))}
       </div>
 
-      <div ref={scroller} onScroll={onScroll} className="flex overflow-x-auto snap-x snap-mandatory scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {visibleSlots.map((slot) => (
-          <div key={slot} className="w-full shrink-0 snap-center px-0.5">
+      <div ref={scroller} onScroll={onScroll} style={{ height: slideH || undefined, transition: "height .2s ease" }}
+        className="flex items-start overflow-x-auto overflow-y-hidden snap-x snap-mandatory scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {visibleSlots.map((slot, i) => (
+          <div key={slot} ref={(el) => { slides.current[i] = el; }} className="w-full shrink-0 snap-center px-0.5 py-0.5">
             <SlotCard slot={slot} entries={logsToday.filter((e) => e.slot === slot)} opts={optsBySlot[slot] || []} target={stg[slot] || { kcal: 0, protein: 0 }} pindex={pindex} />
           </div>
         ))}
@@ -2606,7 +2619,7 @@ export default function App() {
   };
   const skipMeal = (slot) => withUndo("Meal skipped", () => patchFit((f) => ({
     ...f,
-    logs: pushLog(f, [{ id: uid(), date: today, slot, name: "Skipped", kcal: 0, p: 0, c: 0, f: 0, source: "skipped" }]),
+    logs: pushLog(f, [{ id: uid(), date: today, slot, name: "Skipped this meal", kcal: 0, p: 0, c: 0, f: 0, source: "skipped" }]),
     plan: markPlan(f.plan, today, slot, "skipped"),
   })));
   const eatLeftover = (l) => {
@@ -2631,9 +2644,9 @@ export default function App() {
     const slots = fit.prefs.snack ? SLOTS : SLOTS.filter((s) => s !== "snack");
     const existing = JSON.parse(JSON.stringify(fit.plan));
     // slots already eaten today must not be planned again
-    for (const e of fit.logs[today] || []) existing[today] = { ...(existing[today] || {}), [e.slot]: (existing[today] || {})[e.slot] || { rid: "", servings: 0, status: "done" } };
+    for (const e of fit.logs[today] || []) existing[today] = { ...(existing[today] || {}), [e.slot]: (existing[today] || {})[e.slot] || { rid: e.rid || "", servings: 0, status: "done" } };
     const planned = planWeek({ start: today, days: 7, targets: fit.targets, pantry, recipes, byId, slots, existing, today });
-    for (const d of Object.keys(planned)) for (const s of Object.keys(planned[d])) if (!planned[d][s].rid) delete planned[d][s];
+    for (const d of Object.keys(planned)) for (const s of Object.keys(planned[d])) if (!planned[d][s].servings) delete planned[d][s];
     patchFit((f) => ({ ...f, plan: { ...f.plan, ...planned } }));
     notify("Week planned · shopping list updated");
   });
@@ -2716,9 +2729,9 @@ export default function App() {
 
         {/* undo */}
         {undo && (
-          <div className="fixed bottom-36 left-1/2 -translate-x-1/2 z-50 bg-stone-800 text-white text-sm font-semibold pl-4 pr-2 py-2 rounded-full shadow-lg flex items-center gap-3">
-            {undo.label}
-            <button onClick={doUndo} className="px-3 h-8 rounded-full bg-white/15 hover:bg-white/25 font-bold flex items-center gap-1"><RotateCcw size={13} /> Undo</button>
+          <div className="fixed bottom-36 inset-x-0 mx-auto w-fit max-w-[92vw] z-50 bg-stone-800 text-white text-sm font-semibold pl-4 pr-2 py-2 rounded-full shadow-lg flex items-center gap-3">
+            <span className="truncate">{undo.label}</span>
+            <button onClick={doUndo} className="shrink-0 px-3 h-8 rounded-full bg-white/15 hover:bg-white/25 font-bold flex items-center gap-1"><RotateCcw size={13} /> Undo</button>
           </div>
         )}
         <LogSheet open={!!logSheet} slot0={logSheet ? logSheet.slot : ""} onClose={() => setLogSheet(null)} />
@@ -2726,7 +2739,7 @@ export default function App() {
 
         {/* toast */}
         {toast && (
-          <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-stone-800 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow-lg flex items-center gap-2 animate-[slideUp_.2s_ease]">
+          <div className="fixed bottom-24 inset-x-0 mx-auto w-fit max-w-[92vw] z-50 bg-stone-800 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow-lg flex items-center gap-2 animate-[slideUp_.2s_ease]">
             <CircleCheck size={16} className="text-emerald-400" /> {toast}
           </div>
         )}
