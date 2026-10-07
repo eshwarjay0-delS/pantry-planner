@@ -70,6 +70,15 @@ const FOOD_LIST = [
   F("bottlegourd", "Bottle gourd (lauki)", 14, 0.6, 3.4, 0, { pk: 600, al: ["bottle gourd", "lauki", "dudhi", "doodhi"] }),
   F("banana", "Banana", 89, 1.1, 23, 0.3, { pc: 120, pk: 700, count: true, u: ["banana", "bananas"], al: ["banana"] }),
   F("apple", "Apple", 52, 0.3, 14, 0.2, { pc: 180, pk: 900, count: true, u: ["apple", "apples"], al: ["apple"] }),
+  F("chicken", "Chicken", 135, 21, 0, 5, { pk: 500, cat: "Meat & Seafood", al: ["chicken", "murgh", "kozhi", "kodi"], x: ["stock", "broth", "masala", "powder", "nugget", "sausage", "cube"] }),
+  F("batter", "Idli/dosa batter", 132, 4.4, 27, 0.5, { pk: 1000, cat: "Other", al: ["idli dosa batter", "idli batter", "dosa batter", "batter"] }),
+  F("urad", "Urad dal", 341, 25, 59, 1.6, { pk: 500, cat: "Pantry", al: ["urad", "black gram", "ulundu", "minapa"] }),
+  F("coconut", "Coconut", 354, 3.3, 15, 33, { pk: 200, al: ["coconut", "nariyal", "thengai"], x: ["oil", "milk", "water", "sugar", "flour", "cream"] }),
+  F("ragi", "Ragi flour", 336, 7.3, 72, 1.3, { pk: 500, cat: "Pantry", al: ["ragi", "finger millet", "nachni"] }),
+  F("semiya", "Semiya (vermicelli)", 350, 11, 74, 1, { pk: 400, cat: "Pantry", al: ["semiya", "vermicelli", "sevai"] }),
+  F("beans", "Green beans", 31, 1.8, 7, 0.2, { pk: 250, al: ["green bean", "french bean", "string bean", "beans"], x: ["kidney", "soya", "soy", "black", "baked", "coffee", "moong", "mung", "jelly", "rajma"] }),
+  F("pasta", "Pasta", 371, 13, 75, 1.5, { pk: 500, cat: "Pantry", al: ["pasta", "macaroni", "penne", "spaghetti", "fusilli"] }),
+  F("cheese", "Cheese", 370, 23, 2, 30, { pk: 200, cat: "Dairy", al: ["cheese", "cheddar", "mozzarella"], x: ["cottage", "cream", "paneer"] }),
 ];
 
 export const FOODS = Object.fromEntries(FOOD_LIST.map((f) => [f.key, f]));
@@ -366,7 +375,172 @@ export const LIBRARY = [
   R("aloo-chaat-curd", "Aloo chaat with curd", ["snack"], "Crisp potato cubes with curd and onion",
     [["potato", 200], ["curd", 100], ["onion", 20], ["oil", 8]],
     ["Boil, cube and pan-fry the potato in oil until crisp.", "Top with curd, onion, chaat masala and chili."]),
+  // ── South Indian ──
+  R("idli-sambar", "Idli with sambar and coconut chutney", ["breakfast", "dinner"], "5 steamed idlis, vegetable sambar, fresh chutney",
+    [["batter", 250], ["toor", 30], ["carrot", 40], ["tomato", 50], ["onion", 30], ["coconut", 30], ["oil", 5]],
+    ["Steam the batter in idli moulds for 10–12 minutes.", "Cook toor dal soft; simmer with vegetables, tamarind and sambar powder.", "Grind coconut with green chili and salt; temper both with mustard seeds and curry leaves."]),
+  R("masala-dosa", "Masala dosa with coconut chutney", ["breakfast", "dinner"], "Crisp dosas filled with potato masala",
+    [["batter", 220], ["potato", 150], ["onion", 50], ["oil", 12], ["coconut", 30]],
+    ["Boil and crumble the potato; cook with onion, mustard seeds, turmeric and curry leaves.", "Spread batter thin on a hot tawa, drizzle oil and cook until crisp.", "Fill with the masala, fold, and serve with coconut chutney."]),
+  R("ghee-dosa-peanut-chutney", "Ghee dosa with peanut chutney", ["breakfast", "snack"], "Thin ghee-roasted dosas with a roasted peanut chutney",
+    [["batter", 220], ["ghee", 8], ["peanut", 30]],
+    ["Roast peanuts; grind with dry red chili, garlic, tamarind and salt.", "Spread batter thin on a hot tawa and brush with ghee.", "Cook until golden and fold."]),
+  R("ven-pongal", "Ven pongal with curd", ["breakfast", "lunch"], "Soft rice and moong dal with pepper, cumin and ghee",
+    [["rice", 70], ["moong", 40], ["ghee", 12], ["curd", 100]],
+    ["Dry-roast moong dal; pressure-cook with rice and plenty of water until mushy.", "Temper ghee with pepper, cumin, ginger and curry leaves.", "Stir through and serve hot with curd."]),
+  R("onion-uttapam", "Onion tomato uttapam", ["breakfast", "dinner"], "Thick dosas topped with onion and tomato, coconut chutney",
+    [["batter", 250], ["onion", 50], ["tomato", 50], ["oil", 10], ["coconut", 25]],
+    ["Pour thick rounds of batter on an oiled tawa.", "Scatter onion, tomato and green chili on top and press in.", "Cook covered, flip once; serve with coconut chutney."]),
+  R("semiya-upma", "Semiya upma", ["breakfast"], "Roasted vermicelli with vegetables and peanuts",
+    [["semiya", 80], ["peas", 40], ["carrot", 40], ["onion", 40], ["peanut", 15], ["oil", 10]],
+    ["Roast the vermicelli until golden.", "Fry peanuts, mustard seeds, onion and vegetables.", "Add water and salt, then the vermicelli; cook covered until fluffy."]),
+  R("ragi-dosa", "Ragi dosa with peanut chutney", ["breakfast"], "Instant finger-millet dosas",
+    [["ragi", 60], ["rava", 20], ["curd", 50], ["onion", 30], ["oil", 10], ["peanut", 25]],
+    ["Mix ragi flour, rava, curd, onion and water into a thin batter; rest 10 minutes.", "Pour onto a hot oiled tawa and cook until lacy and crisp.", "Serve with ground roasted-peanut chutney."]),
+  R("pesarattu", "Pesarattu with ginger chutney", ["breakfast", "lunch"], "Andhra green-moong dosas, high in protein",
+    [["moong", 90], ["rice", 15], ["onion", 40], ["oil", 10]],
+    ["Soak moong and rice 4 hours; grind with ginger, green chili and cumin.", "Spread on a hot tawa, sprinkle chopped onion and drizzle oil.", "Cook until crisp; serve with ginger chutney."]),
+  R("egg-dosa", "Egg dosa", ["breakfast", "dinner"], "Dosas with two eggs spread and cooked on top",
+    [["batter", 200], ["egg", 100], ["onion", 30], ["oil", 10]],
+    ["Spread batter on a hot tawa.", "Break an egg on top, spread it, and sprinkle onion, pepper and salt.", "Drizzle oil, flip briefly and fold."]),
+  R("medu-vada-sambar", "Medu vada with sambar", ["breakfast", "snack"], "Crisp urad dal vadas dunked in sambar",
+    [["urad", 60], ["oil", 20], ["toor", 25], ["tomato", 40], ["onion", 30]],
+    ["Soak urad dal 3 hours; grind thick and fluffy with pepper and ginger.", "Shape with a hole and fry until golden.", "Simmer toor dal with onion, tomato, tamarind and sambar powder; serve together."]),
+  R("adai", "Adai with coconut chutney", ["breakfast", "dinner"], "Thick mixed-lentil and rice dosas",
+    [["rice", 40], ["chanadal", 30], ["toor", 25], ["urad", 15], ["onion", 40], ["oil", 10], ["coconut", 15]],
+    ["Soak rice and the dals 3 hours; grind coarse with red chili and ginger.", "Stir in chopped onion and curry leaves.", "Cook thick dosas in oil until crisp on both sides."]),
+  R("lemon-rice", "Lemon rice with peanuts and curd", ["lunch", "dinner"], "Tangy tempered rice with peanuts",
+    [["rice", 90], ["peanut", 25], ["chanadal", 10], ["oil", 10], ["curd", 150]],
+    ["Cook rice and cool it.", "Fry peanuts, chana dal, mustard seeds, chili and curry leaves; add turmeric.", "Mix into the rice with lemon juice and salt; serve with curd."]),
+  R("sambar-rice-poriyal", "Sambar rice with beans poriyal", ["lunch", "dinner"], "Vegetable sambar over rice, coconut beans on the side",
+    [["rice", 90], ["toor", 50], ["carrot", 40], ["eggplant", 60], ["tomato", 60], ["onion", 30], ["beans", 100], ["coconut", 15], ["oil", 10]],
+    ["Cook toor dal soft; simmer with vegetables, tamarind and sambar powder.", "Stir-fry chopped beans with mustard seeds and urad; finish with coconut.", "Serve the sambar over rice with the poriyal."]),
+  R("rasam-rice-potato-fry", "Rasam rice with potato fry and curd", ["lunch", "dinner"], "Peppery tomato rasam, crisp potato roast",
+    [["rice", 90], ["toor", 20], ["tomato", 100], ["potato", 150], ["oil", 12], ["curd", 100]],
+    ["Boil tomato with tamarind, rasam powder, pepper and a little cooked dal.", "Roast cubed potato in oil with chili powder until crisp.", "Serve rasam over rice with the potato and curd."]),
+  R("bisi-bele-bath", "Bisi bele bath", ["lunch", "dinner"], "Karnataka one-pot rice, dal and vegetables",
+    [["rice", 60], ["toor", 50], ["carrot", 40], ["beans", 50], ["peas", 30], ["onion", 30], ["peanut", 15], ["ghee", 10]],
+    ["Pressure-cook rice, toor dal and vegetables very soft.", "Stir in tamarind and bisi bele bath powder; simmer until thick.", "Finish with ghee-fried peanuts and curry leaves."]),
+  R("cabbage-kootu-rice", "Cabbage kootu with rice", ["lunch", "dinner"], "Cabbage and moong dal in a coconut-cumin paste",
+    [["cabbage", 150], ["moong", 50], ["coconut", 25], ["rice", 90], ["oil", 6]],
+    ["Cook moong dal until soft; add shredded cabbage and turmeric.", "Grind coconut with cumin and green chili; stir in and simmer.", "Temper with mustard seeds and curry leaves; serve with rice."]),
+  R("veg-kurma-chapati", "Vegetable kurma with chapati", ["lunch", "dinner"], "Mixed vegetables in coconut gravy, 3 chapatis",
+    [["potato", 80], ["carrot", 50], ["peas", 50], ["beans", 50], ["coconut", 30], ["onion", 40], ["tomato", 50], ["atta", 80], ["oil", 10]],
+    ["Grind coconut with green chili, fennel and a little onion.", "Cook the vegetables with onion and tomato, add the paste and simmer.", "Serve with chapatis."]),
+  R("chettinad-egg-curry-rice", "Chettinad egg curry with rice", ["lunch", "dinner"], "3 boiled eggs in a peppery coconut masala",
+    [["egg", 150], ["onion", 60], ["tomato", 80], ["coconut", 20], ["rice", 90], ["oil", 10]],
+    ["Boil and peel the eggs; cook rice.", "Fry onion and tomato; add ground coconut, pepper, fennel and chili.", "Simmer the eggs in the gravy 5 minutes."]),
+  R("coconut-rice", "Coconut rice with curd", ["lunch", "dinner"], "Thengai sadam with peanuts and a crisp tempering",
+    [["rice", 90], ["coconut", 40], ["peanut", 15], ["urad", 5], ["oil", 8], ["curd", 100]],
+    ["Cook rice and cool it.", "Fry peanuts, urad dal, mustard seeds, chili and curry leaves; add grated coconut for a minute.", "Toss with the rice and salt; serve with curd."]),
+  R("mor-kuzhambu-rice", "Mor kuzhambu with rice", ["lunch", "dinner"], "Okra in a spiced curd and coconut gravy",
+    [["curd", 200], ["coconut", 25], ["okra", 100], ["rice", 90], ["oil", 8]],
+    ["Sauté okra in oil until no longer sticky.", "Grind coconut with cumin, green chili and ginger; whisk into the curd with turmeric.", "Warm gently with the okra without boiling; temper and serve with rice."]),
+  R("keerai-kootu-rice", "Keerai kootu with rice", ["lunch", "dinner"], "Spinach and dal with coconut, a spoon of ghee",
+    [["spinach", 150], ["toor", 50], ["coconut", 20], ["rice", 90], ["ghee", 6]],
+    ["Cook toor dal soft; add chopped spinach and cook 5 minutes.", "Stir in coconut ground with cumin and chili.", "Temper in ghee and serve with rice."]),
+  R("vendakkai-kuzhambu-rice", "Vendakkai puli kuzhambu with rice", ["lunch", "dinner"], "Okra in a tangy tamarind gravy, curd on the side",
+    [["okra", 150], ["onion", 50], ["tomato", 60], ["oil", 14], ["rice", 100], ["curd", 100]],
+    ["Fry okra in oil until lightly browned.", "Cook onion and tomato, add tamarind water and kuzhambu powder; simmer until thick.", "Add the okra for 5 minutes; serve with rice and curd."]),
+  R("puliyogare", "Tamarind rice with peanuts and curd", ["lunch", "dinner"], "Puliyogare with a roasted peanut crunch",
+    [["rice", 100], ["peanut", 25], ["chanadal", 10], ["oil", 12], ["curd", 100]],
+    ["Cook rice and cool it.", "Simmer tamarind with chili, jaggery and spices into a thick paste; fry peanuts and chana dal.", "Mix everything into the rice; serve with curd."]),
+  R("paruppu-rice-poriyal", "Paruppu rice with ghee and beans poriyal", ["lunch", "dinner"], "Plain dal mashed into rice with ghee",
+    [["toor", 60], ["rice", 90], ["ghee", 10], ["beans", 120], ["coconut", 15]],
+    ["Cook toor dal very soft with turmeric; mash with salt.", "Stir-fry chopped beans with mustard seeds; finish with coconut.", "Mix dal and ghee into hot rice; serve with the poriyal."]),
+  R("chettinad-chicken-rice", "Chettinad chicken curry with rice", ["lunch", "dinner"], "Peppery chicken curry with coconut",
+    [["chicken", 180], ["onion", 60], ["tomato", 80], ["coconut", 20], ["oil", 12], ["rice", 90]],
+    ["Fry onion and tomato; add ginger-garlic and ground coconut, pepper, fennel and chili.", "Add the chicken and a little water; cook covered 20 minutes until tender.", "Serve over rice."]),
+  R("pepper-chicken-rasam-rice", "Pepper chicken fry with rasam rice", ["lunch", "dinner"], "Dry pepper chicken beside tomato rasam and rice",
+    [["chicken", 180], ["onion", 60], ["oil", 12], ["rice", 90], ["toor", 15], ["tomato", 80]],
+    ["Cook chicken with onion, ginger-garlic, turmeric and salt until dry.", "Finish with plenty of crushed pepper and curry leaves.", "Boil tomato with tamarind, rasam powder and a little dal; serve over rice."]),
+  R("chicken-biryani", "Chicken biryani with raita", ["lunch", "dinner"], "One-pot chicken and rice with onion raita",
+    [["chicken", 180], ["rice", 100], ["onion", 80], ["tomato", 40], ["curd", 150], ["oil", 12]],
+    ["Marinate chicken in half the curd with ginger-garlic and biryani masala.", "Brown the onion, add chicken and tomato, then soaked rice and water; cook covered on low until done.", "Mix the remaining curd with onion and salt for raita."]),
+  R("chicken-curry-dosa", "Chicken curry with dosa", ["lunch", "dinner"], "3 dosas with a coconut chicken curry",
+    [["chicken", 150], ["batter", 220], ["onion", 50], ["tomato", 60], ["coconut", 15], ["oil", 10]],
+    ["Cook chicken with onion, tomato, ginger-garlic and curry masala.", "Stir in ground coconut and simmer until thick.", "Make dosas and serve hot with the curry."]),
+  R("chicken-65-curd-rice", "Pan chicken 65 with curd rice", ["lunch", "dinner"], "Spicy pan-fried chicken with cooling curd rice",
+    [["chicken", 160], ["curd", 200], ["rice", 80], ["oil", 12]],
+    ["Marinate chicken in a spoon of curd with chili, ginger-garlic and salt.", "Pan-fry in oil with curry leaves until browned and cooked through.", "Mix soft rice with the remaining curd and salt; serve together."]),
+  R("chicken-kurma-chapati", "Chicken kurma with chapati", ["lunch", "dinner"], "Mild coconut chicken curry with potato, 3 chapatis",
+    [["chicken", 160], ["coconut", 30], ["onion", 50], ["potato", 80], ["atta", 80], ["oil", 8]],
+    ["Grind coconut with green chili and fennel.", "Cook chicken and potato with onion and ginger-garlic; add the paste and simmer 15 minutes.", "Serve with chapatis."]),
+  R("andhra-chicken-pappu-rice", "Andhra chicken fry with pappu and rice", ["lunch", "dinner"], "Spicy chicken fry with tomato dal and rice",
+    [["chicken", 150], ["toor", 40], ["tomato", 40], ["onion", 40], ["rice", 90], ["oil", 12]],
+    ["Cook toor dal with tomato and turmeric; mash and temper.", "Fry chicken with onion, ginger-garlic and chili powder until dry and browned.", "Serve both with rice."]),
+  R("chickpea-sundal", "Chickpea sundal", ["snack"], "Tempered chickpeas with fresh coconut",
+    [["chickpea", 60], ["coconut", 20], ["oil", 4]],
+    ["Pressure-cook soaked chickpeas with salt.", "Temper mustard seeds, urad, chili and curry leaves; toss in the chickpeas and coconut."]),
+  R("peanut-sundal", "Peanut sundal", ["snack"], "Boiled peanuts with coconut and onion",
+    [["peanut", 50], ["coconut", 15], ["onion", 20]],
+    ["Boil the peanuts with salt until tender.", "Temper mustard seeds and curry leaves; toss with coconut and onion."]),
+  R("buttermilk-peanuts", "Masala buttermilk with roasted peanuts", ["snack"], "Spiced neer mor and a handful of peanuts",
+    [["curd", 200], ["peanut", 30]],
+    ["Whisk curd with water, salt, ginger, green chili and curry leaves.", "Have with roasted peanuts."]),
+  R("podi-idli", "Podi idli with ghee", ["snack"], "Idlis tossed in ghee and idli podi",
+    [["batter", 180], ["ghee", 8]],
+    ["Steam idlis and cut into pieces.", "Toss in warm ghee with idli podi."]),
+  // ── North Indian with chicken ──
+  R("chicken-curry-roti", "Chicken curry with roti", ["lunch", "dinner"], "Home-style onion-tomato chicken curry, 3 rotis",
+    [["chicken", 180], ["onion", 60], ["tomato", 100], ["oil", 12], ["atta", 80]],
+    ["Brown onion; add ginger-garlic, tomato and spices and cook to a masala.", "Add chicken and water; simmer covered 20 minutes.", "Serve with rotis."]),
+  R("chicken-tikka-roti", "Pan chicken tikka with roti and salad", ["lunch", "dinner"], "Curd-marinated chicken, 3 rotis, cucumber salad",
+    [["chicken", 200], ["curd", 60], ["atta", 80], ["cucumber", 80], ["onion", 30], ["oil", 6]],
+    ["Marinate chicken in curd with chili, turmeric, garam masala and salt for 30 minutes.", "Sear in a hot oiled pan until charred and cooked through.", "Serve with rotis, cucumber and onion."]),
+  R("butter-chicken-rice", "Tomato butter chicken with rice", ["lunch", "dinner"], "Chicken in a smooth tomato-ghee gravy",
+    [["chicken", 180], ["tomato", 150], ["ghee", 12], ["curd", 40], ["rice", 90]],
+    ["Marinate chicken in curd and spices; sear in ghee.", "Cook and blend the tomato with ginger-garlic and kasuri methi.", "Simmer the chicken in the gravy 10 minutes; serve with rice."]),
+  R("chicken-egg-wrap", "Chicken omelette roti wrap", ["breakfast", "lunch"], "Egg-lined rotis rolled around spiced chicken",
+    [["egg", 100], ["chicken", 80], ["atta", 60], ["onion", 30], ["oil", 8]],
+    ["Cook diced chicken with onion, chili and salt.", "Cook an omelette onto each half-cooked roti.", "Fill with the chicken and roll."]),
+  // ── American ──
+  R("veg-pasta", "Vegetable pasta with cheese", ["lunch", "dinner"], "Pasta in a fresh tomato and capsicum sauce",
+    [["pasta", 90], ["tomato", 150], ["capsicum", 60], ["onion", 40], ["oil", 10], ["cheese", 30]],
+    ["Boil the pasta.", "Cook onion, capsicum and tomato with garlic into a sauce.", "Toss with the pasta and top with cheese."]),
+  R("grilled-cheese", "Grilled cheese sandwich with tomato", ["breakfast", "lunch"], "Four slices, melted cheese, sliced tomato",
+    [["bread", 120], ["cheese", 50], ["tomato", 60], ["ghee", 8]],
+    ["Fill the bread with cheese and tomato.", "Toast in ghee on a pan, pressing down, until golden and melted."]),
+  R("cheese-omelette-toast", "Cheese omelette with toast", ["breakfast"], "3-egg omelette with cheese, 2 slices of toast",
+    [["egg", 150], ["cheese", 30], ["oil", 6], ["bread", 60]],
+    ["Beat the eggs with salt and pepper.", "Cook in an oiled pan, add cheese, and fold when set.", "Serve with toast."]),
+  R("mac-and-cheese", "Stovetop mac and cheese", ["lunch", "dinner"], "Pasta in a quick milk and cheese sauce",
+    [["pasta", 90], ["milk", 150], ["cheese", 50], ["ghee", 6]],
+    ["Boil the pasta until just tender.", "Warm milk with ghee, stir in the cheese until smooth.", "Fold in the pasta and season with pepper."]),
+  R("egg-salad-sandwich", "Egg salad sandwich", ["lunch", "snack"], "Chopped boiled eggs in curd on 3 slices",
+    [["egg", 100], ["bread", 90], ["curd", 40], ["cucumber", 50]],
+    ["Boil, peel and chop the eggs.", "Mix with curd, salt, pepper and chopped cucumber.", "Pile onto the bread."]),
+  R("grilled-chicken-sandwich", "Grilled chicken sandwich", ["lunch", "dinner"], "Seared chicken, cheese, tomato and cucumber",
+    [["chicken", 150], ["bread", 120], ["cheese", 25], ["tomato", 50], ["cucumber", 40], ["oil", 5]],
+    ["Season and sear the chicken until cooked through; slice.", "Layer with cheese, tomato and cucumber in the bread.", "Toast on the pan until crisp."]),
+  R("chicken-pasta", "Chicken tomato pasta", ["lunch", "dinner"], "Pasta with seared chicken in tomato sauce",
+    [["pasta", 90], ["chicken", 150], ["tomato", 150], ["capsicum", 50], ["oil", 10], ["cheese", 20]],
+    ["Boil the pasta.", "Sear diced chicken; add tomato, capsicum and garlic and cook into a sauce.", "Toss with the pasta and top with cheese."]),
+  R("chicken-rice-bowl", "Chicken rice bowl with vegetables", ["lunch", "dinner"], "Seared chicken over rice with stir-fried vegetables",
+    [["chicken", 180], ["rice", 90], ["cabbage", 60], ["carrot", 50], ["capsicum", 50], ["oil", 10]],
+    ["Cook rice.", "Sear seasoned chicken until cooked through.", "Stir-fry the vegetables on high heat and serve everything over the rice."]),
+  R("chicken-cucumber-salad", "Chicken cucumber salad", ["snack"], "Shredded chicken with cucumber in a curd dressing",
+    [["chicken", 120], ["cucumber", 100], ["curd", 60], ["onion", 20]],
+    ["Poach or pan-cook the chicken and shred it.", "Toss with cucumber, onion, curd, salt and pepper."]),
 ];
+
+// Cuisine of every recipe: "south" (South Indian), "american", otherwise "north" (North Indian and everything else).
+export const CUISINES = ["south", "north", "american"];
+export const CUISINE_LABEL = { south: "South Indian", north: "North Indian", american: "American" };
+const SOUTH_IDS = new Set(["veg-upma", "rava-uttapam", "bread-upma", "curd-rice-peanut", "tomato-rice-eggs",
+  "idli-sambar", "masala-dosa", "ghee-dosa-peanut-chutney", "ven-pongal", "onion-uttapam", "semiya-upma", "ragi-dosa", "pesarattu", "egg-dosa",
+  "medu-vada-sambar", "adai", "lemon-rice", "sambar-rice-poriyal", "rasam-rice-potato-fry", "bisi-bele-bath", "cabbage-kootu-rice", "veg-kurma-chapati",
+  "chettinad-egg-curry-rice", "coconut-rice", "mor-kuzhambu-rice", "keerai-kootu-rice", "vendakkai-kuzhambu-rice", "puliyogare", "paruppu-rice-poriyal",
+  "chettinad-chicken-rice", "pepper-chicken-rasam-rice", "chicken-biryani", "chicken-curry-dosa", "chicken-65-curd-rice", "chicken-kurma-chapati",
+  "andhra-chicken-pappu-rice", "chickpea-sundal", "peanut-sundal", "buttermilk-peanuts", "podi-idli"]);
+const AMERICAN_IDS = new Set(["oats-pb-banana", "pb-toast-milk", "boiled-eggs-apple", "oats-apple-almond", "french-toast", "banana-almond-shake",
+  "banana-pb-toast", "apple-pb", "peanut-banana", "veg-pasta", "grilled-cheese", "cheese-omelette-toast", "mac-and-cheese", "egg-salad-sandwich",
+  "grilled-chicken-sandwich", "chicken-pasta", "chicken-rice-bowl", "chicken-cucumber-salad"]);
+for (const r of LIBRARY) r.cui = SOUTH_IDS.has(r.id) ? "south" : AMERICAN_IDS.has(r.id) ? "american" : "north";
+// Position of a recipe's cuisine in the person's order of preference (0 = favourite).
+export const cuisineRank = (r, order = CUISINES) => { const i = order.indexOf(r.cui || "north"); return i < 0 ? order.length : i; };
+// Full preference order from the favourite: the rest keep their usual order.
+export const cuisineOrder = (first = "south") => [first, ...CUISINES.filter((c) => c !== first)];
 
 // Ingredient amounts for `s` servings. Things you can't split (eggs, bread slices, whole fruit)
 // round to whole pieces, so the card, the macros and the pantry deduction all agree.
@@ -422,7 +596,7 @@ const haveRow = (matrix, have) => {
 };
 
 // Every recipe with the ingredients it still lacks, fewest missing first.
-export function cookable(matrix, have, { slot } = {}) {
+export function cookable(matrix, have, { slot, cuisines = CUISINES } = {}) {
   const h = haveRow(matrix, have);
   const out = [];
   matrix.cells.forEach((row, ri) => {
@@ -432,7 +606,7 @@ export function cookable(matrix, have, { slot } = {}) {
     for (let c = 0; c < row.length; c++) if (row[c] && !h[c]) missing.push(FOOD_KEYS[c]);
     out.push({ recipe, missing });
   });
-  out.sort((a, b) => a.missing.length - b.missing.length || a.recipe.name.localeCompare(b.recipe.name));
+  out.sort((a, b) => a.missing.length - b.missing.length || cuisineRank(a.recipe, cuisines) - cuisineRank(b.recipe, cuisines) || a.recipe.name.localeCompare(b.recipe.name));
   return out;
 }
 
@@ -551,7 +725,9 @@ export function slotTargets({ targets, eaten, openSlots }) {
   return out;
 }
 
-export function rankRecipes({ recipes, slot, target, pindex, dayKey, avoid = new Set(), recent = new Set(), limit = 5 }) {
+// A nudge, not a rule: a dish you can cook from the pantry right now can still beat a favourite-cuisine dish you can't.
+const CUISINE_BONUS = [0.45, 0.15, 0];
+export function rankRecipes({ recipes, slot, target, pindex, dayKey, avoid = new Set(), recent = new Set(), limit = 5, cuisines = CUISINES }) {
   const out = [];
   for (const r of recipes) {
     if (!r.slots.includes(slot)) continue;
@@ -567,7 +743,8 @@ export function rankRecipes({ recipes, slot, target, pindex, dayKey, avoid = new
     const score =
       (1 - Math.min(err, 1.5)) + 0.6 * coverage + 0.35 * (n ? exp / n : 0)
       - (avoid.has(r.id) ? 0.8 : 0) - (recent.has(r.id) ? 0.4 : 0)
-      + 0.18 * hash01(dayKey + slot + r.id);
+      + 0.18 * hash01(dayKey + slot + r.id)
+      + (CUISINE_BONUS[cuisineRank(r, cuisines)] || 0);
     out.push({ recipe: r, servings: s, score, coverage, m: macrosOf(r.ing, s) });
   }
   out.sort((a, b) => b.score - a.score);
@@ -577,11 +754,13 @@ export function rankRecipes({ recipes, slot, target, pindex, dayKey, avoid = new
 // One ranked list per open slot, with no dish repeated across slots — breakfast, lunch and dinner
 // never show the same options. Slots take turns picking their best remaining dish.
 // pinned: { slot: { recipe, servings } } goes first in its own slot and nowhere else.
-export function suggestDay({ recipes, slots, targets, pindex, dayKey, avoid = new Set(), recent = new Set(), pinned = {} }) {
+export function suggestDay({ recipes, slots, targets, pindex, dayKey, avoid = new Set(), recent = new Set(), pinned = {}, cuisines = CUISINES }) {
   const ranked = {}, out = {}, ptr = {};
   const taken = new Set();
   for (const s of slots) {
-    ranked[s] = rankRecipes({ recipes, slot: s, target: targets[s] || { kcal: 0, protein: 0 }, pindex, dayKey, avoid, recent, limit: Infinity });
+    ranked[s] = rankRecipes({ recipes, slot: s, target: targets[s] || { kcal: 0, protein: 0 }, pindex, dayKey, avoid, recent, limit: Infinity, cuisines });
+    // favourite cuisine strictly first, then the next, each in its own best-first order
+    ranked[s].sort((a, b) => cuisineRank(a.recipe, cuisines) - cuisineRank(b.recipe, cuisines) || b.score - a.score);
     out[s] = []; ptr[s] = 0;
     const p = pinned[s];
     if (p && p.recipe) { out[s].push({ recipe: p.recipe, servings: p.servings, m: macrosOf(p.recipe.ing, p.servings) }); taken.add(p.recipe.id); }
@@ -758,7 +937,7 @@ export function coach({ hour, today, targets, slots, logs = {}, water = {}, weig
 /* ───────────────────────────── weekly plan + shopping ───────────────────────────── */
 // plan shape: { [date]: { [slot]: { rid, servings, status?: "done"|"skipped" } } }
 
-export function planWeek({ start, days = 7, targets, pantry, recipes, byId, slots = ["breakfast", "lunch", "dinner"], existing = {}, today }) {
+export function planWeek({ start, days = 7, targets, pantry, recipes, byId, slots = ["breakfast", "lunch", "dinner"], existing = {}, today, cuisines = CUISINES }) {
   let sim = pantry.map((x) => ({ ...x }));
   const plan = {};
   const recent = [];
@@ -779,7 +958,7 @@ export function planWeek({ start, days = 7, targets, pantry, recipes, byId, slot
       if (plan[date][slot]) continue;
       const opts = rankRecipes({
         recipes, slot, target: tg[slot], pindex: indexPantry(sim, today || start), dayKey: date,
-        avoid: new Set([...dayAvoid, ...recent.slice(-12)]), limit: 1,
+        avoid: new Set([...dayAvoid, ...recent]), limit: 1, cuisines,
       });
       if (!opts.length) continue;
       const pick = opts[0];

@@ -13,7 +13,7 @@ import { getFirestore, doc, setDoc, onSnapshot } from "firebase/firestore";
 import {
   SLOTS, SLOT_META, addDaysISO, daysBetween, isoOf, FOODS, fmtAmount, ALL_LIBRARY, macrosOf, withMacros,
   recipeNeeds, indexPantry, deductFromPantry, computeTargets, slotTargets, rankRecipes, planWeek,
-  shoppingNeeds, fmtBuy, buildMatrix, cookable, unlocks, suggestDay, coach, weekGrade, targetsFor, DEADLINE, fmtHour,
+  shoppingNeeds, fmtBuy, buildMatrix, cookable, unlocks, suggestDay, coach, weekGrade, targetsFor, DEADLINE, fmtHour, cuisineOrder, CUISINES, CUISINE_LABEL,
 } from "./engine.js";
 
 /* ─────────────────────────────  constants  ───────────────────────────── */
@@ -359,7 +359,8 @@ async function suggestMeals(pantry) {
   const user =
     `Pantry: ${names.join(", ") || "(nearly empty)"}. ` +
     "Suggest about 40 dishes in total, spread across breakfast, lunch, dinner and dessert. " +
-    "Keep it mostly Indian (a few non-Indian dishes are fine). " +
+    "Put South Indian dishes first and make them the majority (Tamil, Telugu, Kannada and Kerala home cooking), then North Indian, then a few American. " +
+    "The person eats chicken and eggs but no other meat and no fish or seafood; dairy is fine. " +
     'Return {"meals":[{"name": string, "type": "breakfast"|"lunch"|"dinner"|"dessert", ' +
     '"description": string (max 10 words), "ingredients": [string], "servings": number}]}. ' +
     "Keep ingredient names simple and singular. Do NOT include cooking steps.";
@@ -1605,7 +1606,7 @@ const DEFAULT_FIT = {
   dishMemory: {},  // { dishKey: { scale, n } } — remembers how you correct portion estimates
   weights: [],     // [{ date, kg }]
   userRecipes: [], // AI-made recipes built only from known ingredients
-  prefs: { snack: true, extraHave: [] }, // extraHave: staples ticked in Cook now that aren't tracked in the pantry
+  prefs: { snack: true, extraHave: [], cuisineFirst: "south" }, // extraHave: staples ticked in Cook now that aren't tracked in the pantry
 };
 
 function normalizeFit(raw) {
@@ -1658,7 +1659,7 @@ function useToday() {
 async function estimateMeal({ images, note }) {
   const n = images.length;
   const system =
-    "You are a careful nutrition estimator for home-cooked and restaurant food, especially Indian vegetarian cooking. " +
+    "You are a careful nutrition estimator for home-cooked and restaurant food, especially South Indian home cooking. " +
     "Return ONLY valid JSON, no prose, no markdown fences.";
   const user =
     (n ? `You are given ${n} photo${n > 1 ? "s" : ""} of one meal or snack${n > 1 ? " (different angles or separate items)" : ""}. ` : "") +
@@ -1686,13 +1687,14 @@ async function aiRecipes(slot, existingNames) {
   const keys = Object.values(FOODS).map((f) => `${f.key} (${f.name})`).join(", ");
   const system = "You are an Indian home cook and sports dietitian. Return ONLY valid JSON, no prose, no markdown fences.";
   const user =
-    `Create 6 NEW vegetarian (eggs and dairy allowed) Indian home-cooking recipes suited to ${slot}. ` +
+    `Create 6 NEW home-cooking recipes suited to ${slot}. At least 4 must be South Indian (Tamil, Telugu, Kannada or Kerala); the rest North Indian or American. ` +
+    "The person eats chicken and eggs but no other meat and no fish or seafood; dairy is fine. " +
     `Use ONLY these ingredient keys: ${keys}. ` +
-    "Salt, spices, ginger, garlic, chilies, herbs and lemon are always available — do not list them. " +
+    "Salt, spices, masala powders, tamarind, ginger, garlic, chilies, curry leaves, herbs and lemon are always available — do not list them. " +
     "Give each ingredient in grams for ONE serving (liquids in ml, treated as grams). " +
     `Aim for roughly ${slot === "snack" ? "250-400" : "550-800"} kcal per serving with good protein. ` +
     `Avoid duplicating these dishes: ${existingNames.slice(0, 50).join(", ")}. ` +
-    'Return {"recipes":[{"name": string, "description": string (max 8 words), "ingredients":[{"key": string, "grams": number}], "steps":[string, ...3 to 5 short sentences]}]}.';
+    'Return {"recipes":[{"name": string, "description": string (max 8 words), "cuisine": "south"|"north"|"american", "ingredients":[{"key": string, "grams": number}], "steps":[string, ...3 to 5 short sentences]}]}.';
   const out = parseJSON(await callClaude({ system, user, tier: "light", maxTokens: 3000 }));
   const seen = new Set(existingNames.map((n) => n.toLowerCase()));
   const slots = slot === "lunch" || slot === "dinner" ? ["lunch", "dinner"] : [slot];
@@ -1707,7 +1709,7 @@ async function aiRecipes(slot, existingNames) {
     const m = macrosOf(ing, 1);
     if (m.kcal < (slot === "snack" ? 150 : 350) || m.kcal > 1100) continue;
     seen.add(name.toLowerCase());
-    res.push({ id: "u-" + uid(), name, slots, desc: String(r.description || "").trim().slice(0, 80), ing, steps, src: "ai" });
+    res.push({ id: "u-" + uid(), name, slots, desc: String(r.description || "").trim().slice(0, 80), ing, steps, src: "ai", cui: CUISINES.includes(r.cuisine) ? r.cuisine : "north" });
   }
   return res;
 }
@@ -1834,7 +1836,7 @@ function SlotCard({ slot, entries, opts, target, pindex }) {
         <p className="text-lg font-extrabold text-stone-800 leading-snug" style={{ fontFamily: HEAD }}>
           {r.name}{planned && <span className="ml-2 align-middle text-[10px] font-bold text-amber-700 bg-amber-100 rounded px-1.5 py-0.5">PLANNED</span>}
         </p>
-        <p className="text-sm text-stone-500">{r.desc}</p>
+        <p className="text-sm text-stone-500">{r.cui && <span className="font-bold text-emerald-700">{CUISINE_LABEL[r.cui]} · </span>}{r.desc}</p>
       </div>
 
       <div className="mt-3 grid grid-cols-4 gap-2 text-center">
@@ -1948,7 +1950,7 @@ function TodayTab({ openLog, openTargets }) {
     if (lk && !lk.status && byId[lk.rid]) pinned[slot] = { recipe: byId[lk.rid], servings: lk.servings };
   }
   const optsBySlot = suggestDay({
-    recipes, slots: openSlots, targets: stg, pindex, dayKey: today, pinned, recent,
+    recipes, slots: openSlots, targets: stg, pindex, dayKey: today, pinned, recent, cuisines: cuisineOrder(fit.prefs.cuisineFirst),
     avoid: new Set(logsToday.map((e) => e.rid).filter(Boolean)),
   });
 
@@ -2090,7 +2092,7 @@ function TodayTab({ openLog, openTargets }) {
       )}
 
       <Btn variant="soft" className="w-full" onClick={() => { planNextWeek(); setTab("shopping", "list"); }}><CalendarDays size={16} /> Plan my week &amp; build the shopping list</Btn>
-      <p className="text-center text-[11px] text-stone-400">Salt, spices, ginger, garlic, chilies and herbs are assumed to always be in stock.</p>
+      <p className="text-center text-[11px] text-stone-400">Salt, spices and masala powders, tamarind, ginger, garlic, chilies, curry leaves and herbs are assumed to always be in stock.</p>
     </div>
   );
 }
@@ -2230,7 +2232,7 @@ function LogSheet({ open, slot0, onClose }) {
 /* ─────────────────────────────  Targets sheet  ─────────────────────────────── */
 
 function TargetsSheet({ open, onClose }) {
-  const { fit, saveTargets, setSnack } = useApp();
+  const { fit, saveTargets, setSnack, setCuisineFirst } = useApp();
   const t = fit.targets;
   const [p, setP] = useState(t.profile);
   const [custom, setCustom] = useState(!!t.manual);
@@ -2298,6 +2300,12 @@ function TargetsSheet({ open, onClose }) {
           <Field label="Water (ml)"><TextInput type="number" inputMode="numeric" value={man.water} onChange={(e) => setMan({ ...man, water: e.target.value })} /></Field>
         </div>
       )}
+
+      <Field label="Food style shown first" hint="The other two follow in the usual order: South Indian, North Indian, American.">
+        <Select value={fit.prefs.cuisineFirst || "south"} onChange={(e) => setCuisineFirst(e.target.value)}>
+          {CUISINES.map((c) => <option key={c} value={c}>{CUISINE_LABEL[c]}</option>)}
+        </Select>
+      </Field>
 
       <label className="flex items-center justify-between gap-3 text-sm font-semibold text-stone-700">
         Show a snack card each day
@@ -2465,7 +2473,7 @@ function PlanShopping() {
               ))}
             </div>
           ))}
-          <p className="text-[11px] text-stone-400">Amounts are rounded up to practical sizes. Spices, salt, ginger, garlic and chilies are not listed.</p>
+          <p className="text-[11px] text-stone-400">Amounts are rounded up to practical sizes. Spices, masala powders, tamarind, salt, ginger, garlic, chilies and curry leaves are not listed.</p>
         </div>
       )}
     </div>
@@ -2496,7 +2504,8 @@ function CookNow() {
   const foods = Object.values(FOODS);
   const cats = [...new Set(foods.map((f) => f.cat))];
   const have = foods.filter((f) => has(f.key)).map((f) => f.key);
-  const opt = slot === "all" ? {} : { slot };
+  const cuisines = cuisineOrder(fit.prefs.cuisineFirst);
+  const opt = slot === "all" ? { cuisines } : { slot, cuisines };
   const rows = cookable(matrix, have, opt).map((x) => ({
     ...x,
     // ticked from the pantry, but less there than one serving needs
@@ -2542,7 +2551,7 @@ function CookNow() {
                 </div>
               </div>
             ))}
-            <p className="text-[11px] text-stone-400">Ticks you add for things not in your pantry (oil, ghee, flour…) are remembered. Salt, spices, ginger, garlic and chilies are always assumed.</p>
+            <p className="text-[11px] text-stone-400">Ticks you add for things not in your pantry (oil, ghee, flour…) are remembered. Salt, spices, masala powders, tamarind, ginger, garlic, chilies and curry leaves are always assumed.</p>
           </div>
         )}
       </div>
@@ -2573,7 +2582,7 @@ function CookNow() {
               <button onClick={() => setOpenId(open ? null : r.id)} className="w-full text-left p-3 flex items-start gap-3">
                 <div className="min-w-0 flex-1">
                   <p className="font-bold text-stone-800" style={{ fontFamily: HEAD }}>{r.name}</p>
-                  <p className="text-xs text-stone-400 tabular-nums">{r.m.kcal} kcal · {Math.round(r.m.p)} g protein · {r.slots.map((s) => SLOT_META[s].label.toLowerCase()).join(" / ")}</p>
+                  <p className="text-xs text-stone-400 tabular-nums">{r.cui ? CUISINE_LABEL[r.cui] + " · " : ""}{r.m.kcal} kcal · {Math.round(r.m.p)} g protein · {r.slots.map((s) => SLOT_META[s].label.toLowerCase()).join(" / ")}</p>
                   {missing.length > 0
                     ? <p className="text-xs font-semibold text-amber-700 mt-0.5">Missing {missing.length}: {names(missing)}</p>
                     : low.length > 0 && <p className="text-xs font-semibold text-amber-700 mt-0.5">Running low on {names(low)}</p>}
@@ -2904,7 +2913,7 @@ export default function App() {
     const existing = JSON.parse(JSON.stringify(fit.plan));
     // slots already eaten today must not be planned again
     for (const e of fit.logs[today] || []) existing[today] = { ...(existing[today] || {}), [e.slot]: (existing[today] || {})[e.slot] || { rid: e.rid || "", servings: 0, status: "done" } };
-    const planned = planWeek({ start: today, days: 7, targets: fit.targets, pantry, recipes, byId, slots, existing, today });
+    const planned = planWeek({ start: today, days: 7, targets: fit.targets, pantry, recipes, byId, slots, existing, today, cuisines: cuisineOrder(fit.prefs.cuisineFirst) });
     for (const d of Object.keys(planned)) for (const s of Object.keys(planned[d])) if (!planned[d][s].servings) delete planned[d][s];
     patchFit((f) => ({ ...f, plan: { ...f.plan, ...planned } }));
     notify("Week planned · shopping list updated");
@@ -2949,6 +2958,7 @@ export default function App() {
   }, []);
   const setSnack = (on) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, snack: on } }));
   const setExtraHave = (keys) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, extraHave: keys } }));
+  const setCuisineFirst = (c) => patchFit((f) => ({ ...f, prefs: { ...f.prefs, cuisineFirst: c } }));
   const rememberDishes = (items) => patchFit((f) => {
     const mem = { ...f.dishMemory };
     for (const it of items) {
@@ -2971,7 +2981,7 @@ export default function App() {
 
   const ctx = {
     today, fit, recipes, byId, setTab, withUndo, logEntries, removeEntry, cookMeal, skipMeal, eatLeftover,
-    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack, setExtraHave, trainer, adjustKcal, hour,
+    lockMeal, unlockMeal, removePlanned, clearPlan, planNextWeek, addWater, addWeight, saveTargets, setSnack, setExtraHave, setCuisineFirst, trainer, adjustKcal, hour,
     rememberDishes, addAiRecipes, openLog, openSettings,
     pantry, meals, trips, ideas, setIdeas, ideasSig, setIdeasSig, notify,
     addItem, updateItem, adjustQty, removeItem, clearPantry, replacePantry, addOrMerge,

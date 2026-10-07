@@ -138,7 +138,7 @@ test("ranking prefers meals the pantry can cover and expiring stock", () => {
     { id: "e", name: "Cooking oil", quantity: 1, unit: "L" },
   ];
   const pindex = indexPantry(pantry, "2026-10-06");
-  const [top] = rankRecipes({ recipes: ALL_LIBRARY, slot: "dinner", target: { kcal: 800, protein: 40 }, pindex, dayKey: "2026-10-06" });
+  const [top] = rankRecipes({ recipes: ALL_LIBRARY, slot: "dinner", target: { kcal: 800, protein: 40 }, pindex, dayKey: "2026-10-06", cuisines: [] }); // cuisine-neutral
   assert.equal(top.recipe.id, "palak-paneer-roti");
   assert.ok(top.coverage > 0.9);
 });
@@ -366,4 +366,39 @@ test("trainer: streaks and the weekly grade", () => {
   assert.equal(streakOf(logs, "2026-10-07", T, "gain"), 3);
   const g = weekGrade(logs, "2026-10-07", T, "gain");
   assert.equal(g.hit, 3); assert.equal(g.level, "bad");
+});
+
+/* ───── cuisine order and diet ───── */
+import { cuisineOrder, cuisineRank, CUISINES } from "./engine.js";
+
+test("South Indian dishes lead every meal, then North Indian, then American", () => {
+  const slots = ["breakfast", "lunch", "dinner", "snack"];
+  const targets = { breakfast: { kcal: 700, protein: 35 }, lunch: { kcal: 950, protein: 50 }, dinner: { kcal: 800, protein: 45 }, snack: { kcal: 300, protein: 15 } };
+  const out = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07" });
+  for (const s of slots) {
+    const tiers = out[s].map((o) => cuisineRank(o.recipe));
+    assert.equal(out[s][0].recipe.cui, "south", `${s} starts with ${out[s][0].recipe.name}`);
+    for (let i = 1; i < tiers.length; i++) assert.ok(tiers[i] >= tiers[i - 1], `${s}: ${out[s][i].recipe.name} is out of order`);
+  }
+  // the preference can be changed
+  const am = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07", cuisines: cuisineOrder("american") });
+  assert.equal(am.lunch[0].recipe.cui, "american");
+  assert.deepEqual(cuisineOrder("north"), ["north", "south", "american"]);
+});
+
+test("a planned week leans South Indian but still varies", () => {
+  const plan = planWeek({ start: "2026-10-07", days: 7, targets: { kcal: 2875, protein: 150 }, pantry: [], recipes: ALL_LIBRARY, byId, today: "2026-10-07" });
+  const picks = Object.values(plan).flatMap((d) => Object.values(d)).map((e) => byId[e.rid]);
+  assert.equal(picks.length, 21);
+  assert.ok(picks.filter((r) => r.cui === "south").length >= 14, `south ${picks.filter((r) => r.cui === "south").length}/21`);
+  assert.ok(new Set(picks.map((r) => r.id)).size >= 17, "variety");
+});
+
+test("diet: chicken and eggs are the only meats in the library", () => {
+  const meats = new Set(Object.values(FOODS).filter((f) => f.cat === "Meat & Seafood").map((f) => f.key));
+  assert.deepEqual([...meats], ["chicken"]);
+  assert.ok(ALL_LIBRARY.filter((r) => r.ing.some((i) => i.k === "chicken")).length >= 12);
+  assert.ok(ALL_LIBRARY.every((r) => CUISINES.includes(r.cui)));
+  assert.equal(matchFood("Chicken breast"), "chicken");
+  assert.equal(matchFood("Chicken masala powder"), null);
 });
