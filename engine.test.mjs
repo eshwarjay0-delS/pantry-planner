@@ -22,7 +22,8 @@ test("matchFood handles real pantry names without false hits", () => {
   assert.equal(matchFood("Peanut butter"), "pb");
   assert.equal(matchFood("Peanuts"), "peanut");
   assert.equal(matchFood("Groundnut oil"), "oil");
-  assert.equal(matchFood("Rice flour"), null);
+  assert.equal(matchFood("Rice flour"), "riceflour"); // its own ingredient, never plain rice
+  assert.equal(matchFood("Rice bran oil"), "oil");
   assert.equal(matchFood("Coconut milk"), null);
   assert.equal(matchFood("Whole milk"), "milk");
   assert.equal(matchFood("Flattened rice"), "poha");
@@ -371,26 +372,29 @@ test("trainer: streaks and the weekly grade", () => {
 /* ───── cuisine order and diet ───── */
 import { cuisineOrder, cuisineRank, CUISINES } from "./engine.js";
 
-test("South Indian dishes lead every meal, then North Indian, then American", () => {
+test("Telangana dishes lead every meal, then South Indian, North Indian, American", () => {
   const slots = ["breakfast", "lunch", "dinner", "snack"];
   const targets = { breakfast: { kcal: 700, protein: 35 }, lunch: { kcal: 950, protein: 50 }, dinner: { kcal: 800, protein: 45 }, snack: { kcal: 300, protein: 15 } };
   const out = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07" });
   for (const s of slots) {
     const tiers = out[s].map((o) => cuisineRank(o.recipe));
-    assert.equal(out[s][0].recipe.cui, "south", `${s} starts with ${out[s][0].recipe.name}`);
+    assert.equal(out[s][0].recipe.cui, "telangana", `${s} starts with ${out[s][0].recipe.name}`);
+    assert.ok(out[s].filter((o) => o.recipe.cui === "telangana").length >= 3, `${s} has too few Telangana dishes`);
     for (let i = 1; i < tiers.length; i++) assert.ok(tiers[i] >= tiers[i - 1], `${s}: ${out[s][i].recipe.name} is out of order`);
   }
   // the preference can be changed
   const am = suggestDay({ recipes: ALL_LIBRARY, slots, targets, pindex: {}, dayKey: "2026-10-07", cuisines: cuisineOrder("american") });
   assert.equal(am.lunch[0].recipe.cui, "american");
-  assert.deepEqual(cuisineOrder("north"), ["north", "south", "american"]);
+  assert.deepEqual(cuisineOrder("north"), ["north", "telangana", "south", "american"]);
+  assert.deepEqual(cuisineOrder(), CUISINES);
 });
 
-test("a planned week leans South Indian but still varies", () => {
+test("a planned week leans Telangana and South Indian but still varies", () => {
   const plan = planWeek({ start: "2026-10-07", days: 7, targets: { kcal: 2875, protein: 150 }, pantry: [], recipes: ALL_LIBRARY, byId, today: "2026-10-07" });
   const picks = Object.values(plan).flatMap((d) => Object.values(d)).map((e) => byId[e.rid]);
   assert.equal(picks.length, 21);
-  assert.ok(picks.filter((r) => r.cui === "south").length >= 14, `south ${picks.filter((r) => r.cui === "south").length}/21`);
+  const home = picks.filter((r) => r.cui === "telangana" || r.cui === "south").length, tel = picks.filter((r) => r.cui === "telangana").length;
+  assert.ok(home >= 16 && tel >= 9, `telangana ${tel}, south+telangana ${home} of 21`);
   assert.ok(new Set(picks.map((r) => r.id)).size >= 17, "variety");
 });
 
