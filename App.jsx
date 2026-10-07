@@ -359,7 +359,7 @@ async function suggestMeals(pantry) {
   const user =
     `Pantry: ${names.join(", ") || "(nearly empty)"}. ` +
     "Suggest about 40 dishes in total, spread across breakfast, lunch, dinner and dessert. " +
-    "Put Telangana home cooking first and make it the largest group (pappu, pulusu, vepudu, jonna rotte, bagara rice, sarva pindi, Hyderabadi dishes), then other South Indian, then North Indian, then a few American. " +
+    "Put Telangana home cooking first and make it the largest group (pappu, pulusu, vepudu, jonna rotte, bagara rice, sarva pindi, Hyderabadi dishes), then Andhra (pesarattu, pulusu, iguru, ulavacharu, Guntur-style curries), then other South Indian, then North Indian, then a few American. " +
     "The person eats chicken and eggs but no other meat and no fish or seafood; dairy is fine. " +
     'Return {"meals":[{"name": string, "type": "breakfast"|"lunch"|"dinner"|"dessert", ' +
     '"description": string (max 10 words), "ingredients": [string], "servings": number}]}. ' +
@@ -1659,7 +1659,7 @@ function useToday() {
 async function estimateMeal({ images, note }) {
   const n = images.length;
   const system =
-    "You are a careful nutrition estimator for home-cooked and restaurant food, especially Telangana and other South Indian home cooking. " +
+    "You are a careful nutrition estimator for home-cooked and restaurant food, especially Telangana, Andhra and other South Indian home cooking. " +
     "Return ONLY valid JSON, no prose, no markdown fences.";
   const user =
     (n ? `You are given ${n} photo${n > 1 ? "s" : ""} of one meal or snack${n > 1 ? " (different angles or separate items)" : ""}. ` : "") +
@@ -1687,14 +1687,14 @@ async function aiRecipes(slot, existingNames) {
   const keys = Object.values(FOODS).map((f) => `${f.key} (${f.name})`).join(", ");
   const system = "You are an Indian home cook and sports dietitian. Return ONLY valid JSON, no prose, no markdown fences.";
   const user =
-    `Create 6 NEW home-cooking recipes suited to ${slot}. At least 3 must be Telangana home cooking (pappu, pulusu, vepudu, jonna rotte, bagara rice, Hyderabadi dishes) and at least 1 other South Indian; the rest North Indian or American. ` +
+    `Create 6 NEW home-cooking recipes suited to ${slot}. At least 3 must be Telangana home cooking (pappu, pulusu, vepudu, jonna rotte, bagara rice, Hyderabadi dishes) and at least 2 Andhra (iguru, pulusu, ulavacharu, Guntur-style); the rest other South Indian, North Indian or American. ` +
     "The person eats chicken and eggs but no other meat and no fish or seafood; dairy is fine. " +
     `Use ONLY these ingredient keys: ${keys}. ` +
     "Salt, spices, masala powders, tamarind, ginger, garlic, chilies, curry leaves, herbs and lemon are always available — do not list them. " +
     "Give each ingredient in grams for ONE serving (liquids in ml, treated as grams). " +
     `Aim for roughly ${slot === "snack" ? "250-400" : "550-800"} kcal per serving with good protein. ` +
     `Avoid duplicating these dishes: ${existingNames.slice(0, 50).join(", ")}. ` +
-    'Return {"recipes":[{"name": string, "description": string (max 8 words), "cuisine": "telangana"|"south"|"north"|"american", "ingredients":[{"key": string, "grams": number}], "steps":[string, ...3 to 5 short sentences]}]}.';
+    'Return {"recipes":[{"name": string, "description": string (max 8 words), "cuisine": "telangana"|"andhra"|"south"|"north"|"american", "ingredients":[{"key": string, "grams": number}], "steps":[string, ...3 to 5 short sentences]}]}.';
   const out = parseJSON(await callClaude({ system, user, tier: "light", maxTokens: 3000 }));
   const seen = new Set(existingNames.map((n) => n.toLowerCase()));
   const slots = slot === "lunch" || slot === "dinner" ? ["lunch", "dinner"] : [slot];
@@ -2301,7 +2301,7 @@ function TargetsSheet({ open, onClose }) {
         </div>
       )}
 
-      <Field label="Food style shown first" hint="The rest follow in the usual order: Telangana, South Indian, North Indian, American.">
+      <Field label="Food style shown first" hint="The rest follow in the usual order: Telangana, Andhra, South Indian, North Indian, American.">
         <Select value={fit.prefs.tasteFirst || "telangana"} onChange={(e) => setCuisineFirst(e.target.value)}>
           {CUISINES.map((c) => <option key={c} value={c}>{CUISINE_LABEL[c]}</option>)}
         </Select>
